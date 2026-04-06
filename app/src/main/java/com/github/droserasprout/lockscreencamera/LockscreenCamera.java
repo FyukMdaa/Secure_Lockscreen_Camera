@@ -1,54 +1,74 @@
 package com.github.droserasprout.lockscreencamera;
 
 import android.app.Activity;
-import android.app.AndroidAppHelper;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
 import android.provider.MediaStore;
+import android.util.Log;
 import android.view.Window;
 import android.view.WindowManager;
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
-public class LockscreenCamera implements IXposedHookLoadPackage {
-    public void handleLoadPackage(LoadPackageParam loadPackageParam) {
-        XposedBridge.log("lockscreencamera: applying hooks");
-        if (loadPackageParam.packageName.equals("com.android.camera")) {
-            XposedBridge.log("lockscreencamera: applying com.android.camera hooks");
+import androidx.annotation.NonNull;
 
-            XC_MethodHook onCreateHook = new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    XposedBridge.log("lockscreencamera: hooking Camera activity");
-                    Activity activity = (Activity) param.thisObject;
+import java.lang.reflect.Method;
 
-                    activity.setShowWhenLocked(true);
-                    activity.setTurnScreenOn(true);
+import io.github.libxposed.api.XposedModule;
+import io.github.libxposed.api.XposedModuleInterface;
 
-                    final Window win = activity.getWindow();
-                    win.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                }
-            };
+public class LockscreenCamera extends XposedModule {
 
-            XposedHelpers.findAndHookMethod(
-                    "com.android.camera.Camera",
-                    loadPackageParam.classLoader,
-                    "onCreate",
-                    Bundle.class,
-                    onCreateHook);
-        } else if (loadPackageParam.packageName.equals("android")) {
-            XposedBridge.log("lockscreencamera: applying com.android.server.GestureLauncherService hooks");
+    private static final String TAG = "LockscreenCamera";
 
-            XC_MethodHook handleCameraGestureHook = new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    XposedBridge.log("lockscreencamera: hooking GestureLauncherService");
+    @Override
+    public void onPackageReady(@NonNull PackageReadyParam param) {
+        if (!param.getPackageName().equals("com.android.camera")) {
+            return;
+        }
 
-                    Context context = AndroidAppHelper.currentApplication();
+        log(Log.INFO, TAG, "applying com.android.camera hooks");
+
+        try {
+            Class<?> cameraClass = Class.forName(
+                    "com.android.camera.Camera", true, param.getClassLoader());
+            Method onCreate = cameraClass.getDeclaredMethod("onCreate", Bundle.class);
+
+            hook(onCreate).intercept(chain -> {
+                log(Log.INFO, TAG, "hooking Camera activity onCreate");
+                Activity activity = (Activity) chain.getThisObject();
+
+                activity.setShowWhenLocked(true);
+                activity.setTurnScreenOn(true);
+
+                final Window win = activity.getWindow();
+                win.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+                return chain.proceed();
+            });
+
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "Error hooking com.android.camera", t);
+        }
+    }
+
+    @Override
+    public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
+        log(Log.INFO, TAG, "applying system_server hooks for GestureLauncherService");
+
+        try {
+            Class<?> gestureClass = Class.forName(
+                    "com.android.server.GestureLauncherService", true, param.getClassLoader());
+            Method handleCameraGesture = gestureClass.getDeclaredMethod(
+                    "handleCameraGesture", boolean.class, int.class);
+
+            hook(handleCameraGesture).intercept(chain -> {
+                log(Log.INFO, TAG, "hooking GestureLauncherService.handleCameraGesture");
+
+                // GestureLauncherService extends SystemService, which provides getContext()
+                try {
+                    Method getContextMethod = chain.getThisObject().getClass()
+                            .getMethod("getContext");
+                    Context context = (Context) getContextMethod.invoke(chain.getThisObject());
 
                     Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -56,19 +76,15 @@ public class LockscreenCamera implements IXposedHookLoadPackage {
                     intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
 
                     context.startActivity(intent);
+                } catch (Throwable t) {
+                    log(Log.ERROR, TAG, "Error launching secure camera from system_server", t);
                 }
-            };
 
-            XposedHelpers.findAndHookMethod(
-                    "com.android.server.GestureLauncherService",
-                    loadPackageParam.classLoader,
-                    "handleCameraGesture",
-                    boolean.class,
-                    int.class,
-                    handleCameraGestureHook
-            );
-        } else {
-            XposedBridge.log("lockscreencamera: skipping " + loadPackageParam.packageName);
+                return chain.proceed();
+            });
+
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "Error hooking GestureLauncherService", t);
         }
     }
 }
