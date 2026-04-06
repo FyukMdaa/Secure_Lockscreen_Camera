@@ -104,35 +104,47 @@ public class LockscreenCamera extends XposedModule {
         log(Log.INFO, TAG, "onSystemServerStarting called");
         log(Log.INFO, TAG, "applying system_server hooks for GestureLauncherService");
 
+        // GestureLauncherService
         try {
             Class<?> gestureClass = Class.forName(
                     "com.android.server.GestureLauncherService", true, param.getClassLoader());
             Method handleCameraGesture = gestureClass.getDeclaredMethod(
                     "handleCameraGesture", boolean.class, int.class);
-
             hook(handleCameraGesture).intercept(chain -> {
-                log(Log.INFO, TAG, "hooking GestureLauncherService.handleCameraGesture");
+                log(Log.INFO, TAG, "suppressing GestureLauncherService.handleCameraGesture");
+                return null;
+            });
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "Error hooking GestureLauncherService", t);
+        }
+        
+        // PhoneWindowManager（こちらがカメラを起動している）
+        try {
+            Class<?> pwmClass = Class.forName(
+                    "com.android.server.policy.PhoneWindowManager", true, param.getClassLoader());
+            Method handleCameraGesture = pwmClass.getDeclaredMethod("handleCameraGesture");
+            hook(handleCameraGesture).intercept(chain -> {
+                log(Log.INFO, TAG, "hooking PhoneWindowManager.handleCameraGesture");
                 try {
-                    Method getContextMethod = chain.getThisObject().getClass()
-                            .getMethod("getContext");
+                    Method getContextMethod = chain.getThisObject().getClass().getMethod("getContext");
                     Context context = (Context) getContextMethod.invoke(chain.getThisObject());
                     Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
+                    intent.setPackage("com.android.camera");
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK);
                     intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                    android.os.UserHandle current = (android.os.UserHandle) 
+                    android.os.UserHandle current = (android.os.UserHandle)
                         android.os.UserHandle.class.getField("CURRENT").get(null);
                     Method startActivityAsUser = Context.class.getMethod(
                         "startActivityAsUser", Intent.class, android.os.UserHandle.class);
                     startActivityAsUser.invoke(context, intent, current);
                 } catch (Throwable t) {
-                    log(Log.ERROR, TAG, "Error launching secure camera from system_server", t);
+                    log(Log.ERROR, TAG, "Error launching secure camera from PhoneWindowManager", t);
                 }
-                return null;
+                return null;  // 元の処理をキャンセル
             });
-
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Error hooking GestureLauncherService", t);
+            log(Log.ERROR, TAG, "Error hooking PhoneWindowManager", t);
         }
     }
 }
