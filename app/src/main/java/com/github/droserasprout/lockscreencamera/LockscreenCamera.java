@@ -32,24 +32,41 @@ public class LockscreenCamera extends XposedModule {
             Class<?> cameraClass = Class.forName(
                     "com.android.camera.Camera", true, param.getClassLoader());
             Method onCreate = cameraClass.getDeclaredMethod("onCreate", Bundle.class);
-
+        
             hook(onCreate).intercept(chain -> {
                 log(Log.INFO, TAG, "hooking Camera activity onCreate");
                 Activity activity = (Activity) chain.getThisObject();
-
                 activity.setShowWhenLocked(true);
                 activity.setTurnScreenOn(true);
-
                 final Window win = activity.getWindow();
                 win.addFlags(
                     WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
                     WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
                     WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
                 );
-
                 return chain.proceed();
             });
-
+        
+            for (String methodName : new String[]{"onStart", "onResume"}) {
+                try {
+                    Method m = cameraClass.getDeclaredMethod(methodName);
+                    hook(m).intercept(chain -> {
+                        Activity activity = (Activity) chain.getThisObject();
+                        activity.setShowWhenLocked(true);
+                        activity.setTurnScreenOn(true);
+                        final Window win = activity.getWindow();
+                        win.addFlags(
+                            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
+                            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                        );
+                        return chain.proceed();
+                    });
+                } catch (Throwable t) {
+                    log(Log.WARN, TAG, "Could not hook " + methodName, t);
+                }
+            }
+        
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "Error hooking com.android.camera", t);
         }
