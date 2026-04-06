@@ -1,24 +1,50 @@
-buildscript {
-    repositories {
-        google()
-        mavenCentral()
-    }
-    dependencies {
-        classpath 'com.android.tools.build:gradle:7.0.2'
-
-        // NOTE: Do not place your application dependencies here; they belong
-        // in the individual module build.gradle files
-    }
+plugins {
+    id 'com.android.application'
 }
 
-allprojects {
-    repositories {
-        google()
-        mavenCentral()
-        maven { url 'https://api.xposed.info/' }
+android {
+    namespace 'com.github.droserasprout.lockscreencamera'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.github.droserasprout.lockscreencamera"
+        minSdk 30
+        targetSdk 34
+        versionCode 2
+        versionName "2.0.0"
     }
+
+    signingConfigs {
+        release {
+            storeFile file(System.getenv("KEYSTORE_PATH") ?: "release.keystore")
+            storePassword System.getenv("KEYSTORE_PASSWORD") ?: ""
+            keyAlias System.getenv("KEY_ALIAS") ?: ""
+            keyPassword System.getenv("KEY_PASSWORD") ?: ""
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            signingConfig signingConfigs.release
+            proguardFiles 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        resources {
+            merges += "META-INF/xposed/*"
+        }
+    }
+
+    dependenciesInfo.includeInApk false
 }
 
-task clean(type: Delete) {
-    delete rootProject.buildDir
+dependencies {
+    compileOnly 'io.github.libxposed:api:101'
 }
