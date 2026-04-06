@@ -120,7 +120,9 @@ public class LockscreenCamera extends XposedModule {
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK);
                     intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                    context.startActivity(intent);
+                    Method startActivityAsUser = Context.class.getMethod(
+                        "startActivityAsUser", Intent.class, android.os.UserHandle.class);
+                    startActivityAsUser.invoke(context, intent, android.os.UserHandle.CURRENT);
                 } catch (Throwable t) {
                     log(Log.ERROR, TAG, "Error launching secure camera from system_server", t);
                 }
