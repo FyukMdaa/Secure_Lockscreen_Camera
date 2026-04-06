@@ -128,7 +128,7 @@ public class LockscreenCamera extends XposedModule {
                 } catch (Throwable t) {
                     log(Log.ERROR, TAG, "Error launching secure camera from system_server", t);
                 }
-                return chain.proceed();
+                return null;
             });
 
         } catch (Throwable t) {
