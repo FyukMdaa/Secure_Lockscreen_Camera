@@ -20,6 +20,19 @@ public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
 
+    private static Method findMethod(Class<?> clazz, String name, Class<?>... params)
+            throws NoSuchMethodException {
+        Class<?> c = clazz;
+        while (c != null) {
+            try {
+                return c.getDeclaredMethod(name, params);
+            } catch (NoSuchMethodException e) {
+                c = c.getSuperclass();
+            }
+        }
+        throw new NoSuchMethodException(name);
+    }
+
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
         if (!param.getPackageName().equals("com.android.camera")) {
@@ -31,8 +44,8 @@ public class LockscreenCamera extends XposedModule {
         try {
             Class<?> cameraClass = Class.forName(
                     "com.android.camera.Camera", true, param.getClassLoader());
-            Method onCreate = cameraClass.getDeclaredMethod("onCreate", Bundle.class);
-        
+
+            Method onCreate = findMethod(cameraClass, "onCreate", Bundle.class);
             hook(onCreate).intercept(chain -> {
                 log(Log.INFO, TAG, "hooking Camera activity onCreate");
                 Activity activity = (Activity) chain.getThisObject();
@@ -46,10 +59,10 @@ public class LockscreenCamera extends XposedModule {
                 );
                 return chain.proceed();
             });
-        
+
             for (String methodName : new String[]{"onStart", "onResume"}) {
                 try {
-                    Method m = cameraClass.getDeclaredMethod(methodName);
+                    Method m = findMethod(cameraClass, methodName);
                     hook(m).intercept(chain -> {
                         Activity activity = (Activity) chain.getThisObject();
                         activity.setShowWhenLocked(true);
@@ -66,7 +79,7 @@ public class LockscreenCamera extends XposedModule {
                     log(Log.WARN, TAG, "Could not hook " + methodName, t);
                 }
             }
-        
+
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "Error hooking com.android.camera", t);
         }
@@ -74,7 +87,7 @@ public class LockscreenCamera extends XposedModule {
 
     @Override
     public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
-        log(Log.INFO, TAG, "onSystemServerStarting called"); 
+        log(Log.INFO, TAG, "onSystemServerStarting called");
         log(Log.INFO, TAG, "applying system_server hooks for GestureLauncherService");
 
         try {
@@ -85,23 +98,18 @@ public class LockscreenCamera extends XposedModule {
 
             hook(handleCameraGesture).intercept(chain -> {
                 log(Log.INFO, TAG, "hooking GestureLauncherService.handleCameraGesture");
-
-                // GestureLauncherService extends SystemService, which provides getContext()
                 try {
                     Method getContextMethod = chain.getThisObject().getClass()
                             .getMethod("getContext");
                     Context context = (Context) getContextMethod.invoke(chain.getThisObject());
-
                     Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK);
                     intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
-
                     context.startActivity(intent);
                 } catch (Throwable t) {
                     log(Log.ERROR, TAG, "Error launching secure camera from system_server", t);
                 }
-
                 return chain.proceed();
             });
 
