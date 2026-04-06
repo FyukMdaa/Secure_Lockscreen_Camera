@@ -57,6 +57,7 @@ public class LockscreenCamera extends XposedModule {
 
     @Override
     public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
+        log(Log.INFO, TAG, "onSystemServerStarting called"); 
         log(Log.INFO, TAG, "applying system_server hooks for GestureLauncherService");
 
         try {
