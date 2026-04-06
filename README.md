@@ -16,7 +16,7 @@ Xposed Framework module to skip authentication on "Quickly open camera" gesture.
 
 * Android 11+
 * root
-* LSPosed (Vector and other forks should work)
+* LSPosed (A fork that supports API 101 should work.)
 * MIUI Camera or GCam port
 
 ## Installation
