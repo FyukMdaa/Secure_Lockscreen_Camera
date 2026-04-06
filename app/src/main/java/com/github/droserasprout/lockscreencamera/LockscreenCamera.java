@@ -80,6 +80,20 @@ public class LockscreenCamera extends XposedModule {
                 }
             }
 
+            // checkKeyguard と checkKeyguardFlag を無効化
+            for (String methodName : new String[]{"checkKeyguard", "checkKeyguardFlag"}) {
+                try {
+                    Method m = findMethod(cameraClass, methodName);
+                    hook(m).intercept(chain -> {
+                        log(Log.INFO, TAG, "suppressing " + methodName);
+                        // 何もせずreturn（setShowWhenLocked(false)を呼ばせない）
+                        return null;
+                    });
+                } catch (Throwable t) {
+                    log(Log.WARN, TAG, "Could not hook " + methodName, t);
+                }
+            }
+
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "Error hooking com.android.camera", t);
         }
