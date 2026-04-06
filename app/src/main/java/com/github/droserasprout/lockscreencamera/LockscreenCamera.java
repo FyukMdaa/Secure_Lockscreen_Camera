@@ -41,7 +41,11 @@ public class LockscreenCamera extends XposedModule {
                 activity.setTurnScreenOn(true);
 
                 final Window win = activity.getWindow();
-                win.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                win.addFlags(
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                );
 
                 return chain.proceed();
             });
