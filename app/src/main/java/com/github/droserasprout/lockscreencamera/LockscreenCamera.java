@@ -40,37 +40,56 @@ public class LockscreenCamera extends XposedModule {
             return;
         }
     
-        log(Log.INFO, TAG, "Applying generic hooks to com.android.camera");
+        log(Log.INFO, TAG, "Applying persistent hooks to com.android.camera");
     
-        // 特定のクラス名に依存せず、ActivityクラスのonCreateをフックする
         try {
-            hook(Activity.class.getDeclaredMethod("onCreate", Bundle.class)).intercept(chain -> {
-                Activity activity = (Activity) chain.getThisObject();
-                
-                // 呼び出し元がcom.android.cameraパッケージのActivityである場合のみ処理
-                if (activity.getPackageName().equals("com.android.camera")) {
-                    log(Log.INFO, TAG, "Activity detected: " + activity.getClass().getName());
-    
-                    // 1. ロック画面上での表示を許可 (Android 8.0+)
-                    activity.setShowWhenLocked(true);
-                    activity.setTurnScreenOn(true);
-                    
-                    // 2. キーガードの解除（必要な場合）
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                        activity.getSystemService(android.app.KeyguardManager.class)
-                                .requestDismissKeyguard(activity, null);
-                    }
-    
-                    // 3. 従来のフラグも念のためセット
-                    Window win = activity.getWindow();
-                    win.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
-                            | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                            | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            // ActivityクラスのonCreateとonResumeをまとめてフック
+            String[] targetMethods = {"onCreate", "onResume"};
+            
+            for (String methodName : targetMethods) {
+                Method m;
+                if (methodName.equals("onCreate")) {
+                    m = Activity.class.getDeclaredMethod("onCreate", Bundle.class);
+                } else {
+                    m = Activity.class.getDeclaredMethod("onResume");
                 }
-                return chain.proceed();
-            });
+    
+                hook(m).intercept(chain -> {
+                    Activity activity = (Activity) chain.getThisObject();
+                    
+                    // 対象パッケージのActivityのみ処理
+                    if (activity.getPackageName().equals("com.android.camera")) {
+                        applyLockscreenFlags(activity);
+                    }
+                    return chain.proceed();
+                });
+            }
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Failed to hook Activity.onCreate", t);
+            log(Log.ERROR, TAG, "Failed to hook Activity lifecycle methods", t);
+        }
+    }
+    
+    // フラグ適用処理を共通化
+    private void applyLockscreenFlags(Activity activity) {
+        try {
+            // 1. 基本的な表示許可 (Android 8.0+)
+            activity.setShowWhenLocked(true);
+            activity.setTurnScreenOn(true);
+            
+            // 2. 比較的新しいAPIでのフラグ継承 (Android 10+)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                activity.setInheritShowWhenLocked(true);
+            }
+    
+            // 3. Windowフラグの強制セット
+            Window win = activity.getWindow();
+            win.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                    | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                    | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    
+            log(Log.INFO, TAG, "Applied lockscreen flags to: " + activity.getClass().getName());
+        } catch (Throwable t) {
+            // 失敗してもログに残すのみ
         }
     }
 
