@@ -25,8 +25,8 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
-    // 重複スキャン防止用キャッシュ
-    private static final Set<Class<?>> scannedClasses = new HashSet<>();
+    // 重複フィールドスキャン防止用キャッシュ
+    private static final Set<Class<?>> patchedClasses = new HashSet<>();
 
     public LockscreenCamera() {
         super();
@@ -38,65 +38,56 @@ public class LockscreenCamera extends XposedModule {
             return;
         }
 
-        log(Log.INFO, TAG, "Targeting com.android.camera (Final Battle Code)");
+        log(Log.INFO, TAG, "Targeting com.android.camera (Final Deep Patch / SDK 36 Ready)");
 
-        // 1. 【デバッグ用】setShowWhenLocked(false) の呼び出し元を特定
+        // 【デバッグトラップ】誰が setShowWhenLocked(false) を呼んでいるか特定
         try {
             Method setter = Activity.class.getDeclaredMethod("setShowWhenLocked", boolean.class);
             hook(setter).intercept(chain -> {
                 // 修正: List<Object> のため .get(0) を使用
-                boolean value = (boolean) chain.getArgs().get(0);
-                if (!value) {
+                boolean val = (boolean) chain.getArgs().get(0);
+                if (!val) {
                     log(Log.ERROR, TAG, "!!! ALERT !!! setShowWhenLocked(false) called by: " +                         Log.getStackTraceString(new Throwable()));
                 }
                 return chain.proceed();
             });
         } catch (Throwable ignored) {}
 
-        // 2. 【重要】ライフサイクルメソッドをフック
-        // onCreate, onResume に加え、onAttachedToWindow と onWindowFocusChanged を追加
-        // これにより、描画の直前で状態を確定させる
-        String[] persistentMethods = {"onCreate", "onResume", "onAttachedToWindow", "onWindowFocusChanged"};
-
-        for (String methodName : persistentMethods) {
+        // 【重要】Activity.class のライフサイクルを直接フック
+        // これにより、匿名クラスや内部ヘルパーActivityも漏れなく捕捉できる
+        String[] criticalMethods = {"onCreate", "onPostCreate", "onResume", "onAttachedToWindow", "onWindowFocusChanged"};
+        
+        for (String mname : criticalMethods) {
             try {
                 Method m;
-                if (methodName.equals("onCreate")) {
-                    m = Activity.class.getDeclaredMethod(methodName, Bundle.class);
-                } else if (methodName.equals("onWindowFocusChanged")) {
-                    m = Activity.class.getDeclaredMethod(methodName, boolean.class);
-                } else {
-                    m = Activity.class.getDeclaredMethod(methodName);
+                switch (mname) {
+                    case "onCreate":
+                        m = Activity.class.getDeclaredMethod("onCreate", Bundle.class);
+                        break;
+                    case "onPostCreate":
+                        m = Activity.class.getDeclaredMethod("onPostCreate", Bundle.class);
+                        break;
+                    case "onWindowFocusChanged":
+                        m = Activity.class.getDeclaredMethod("onWindowFocusChanged", boolean.class);
+                        break;
+                    default:
+                        m = Activity.class.getDeclaredMethod(mname);
+                        break;
                 }
 
                 hook(m).intercept(chain -> {
-                    Activity activity = (Activity) chain.getThisObject();
-                    
-                    if (activity.getPackageName().equals("com.android.camera")) {
-                        // MIUI の判定を欺くために、処理前に強制的に内部状態を書き換える
-                        forceFixInternalFields(activity);
-                        applyLockscreenFlags(activity);
+                    Activity act = (Activity) chain.getThisObject();
+                    // スコープ内のカメラActivityでのみ実行
+                    if (act.getPackageName().equals("com.android.camera")) {
+                        // 可視性/状態変化のたびに深層パッチを適用
+                        applyDeepPatches(act);
                     }
-                    
                     return chain.proceed();
                 });
             } catch (Throwable ignored) {
-                // メソッドが存在しない場合は無視
+                // 特定ROMでメソッドが存在しない場合は無視
             }
         }
-        
-        // 3. MIUI 固有のキーガードチェック無効化 (保険)
-        for (String methodName : new String[]{"checkKeyguard", "checkKeyguardFlag"}) {
-            try {
-                // checkKeyguard は ActivityBase などに存在する可能性が高いため、
-                // 見つからなくてもエラーにならないように try-catch しておく
-                Method m = Activity.class.getDeclaredMethod(methodName);
-                hook(m).intercept(chain -> {
-                    log(Log.DEBUG, TAG, "Suppressed method: " + methodName);
-                    if (m.getReturnType() == boolean.class) return false;
-                    return null;
-                });
-            } catch (Throwable ignored) {}        }
     }
 
     @Override
@@ -105,8 +96,7 @@ public class LockscreenCamera extends XposedModule {
 
         try {
             Class<?> gestureClass = Class.forName(
-                    "com.android.server.GestureLauncherService", true, param.getClassLoader());
-            Method handleCameraGesture = gestureClass.getDeclaredMethod(
+                    "com.android.server.GestureLauncherService", true, param.getClassLoader());            Method handleCameraGesture = gestureClass.getDeclaredMethod(
                     "handleCameraGesture", boolean.class, int.class);
 
             hook(handleCameraGesture).intercept(chain -> {
@@ -114,19 +104,21 @@ public class LockscreenCamera extends XposedModule {
                     Method getContextMethod = chain.getThisObject().getClass().getMethod("getContext");
                     Context context = (Context) getContextMethod.invoke(chain.getThisObject());
 
-                    // 鍵画面が出ていない場合は通常起動に任せる
+                    // 鍵画面が出ていない場合は通常起動にフォールバック
                     KeyguardManager km = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
                     if (km != null && !km.isKeyguardLocked()) {
                         return chain.proceed();
                     }
 
                     Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
+                    // 【強化】SDK 36 / HyperOS 対策のIntentフラグ
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK 
                             | Intent.FLAG_ACTIVITY_CLEAR_TASK 
                             | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS 
                             | Intent.FLAG_ACTIVITY_NO_USER_ACTION
-                            | Intent.FLAG_ACTIVITY_NO_ANIMATION
-                            | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+                            | Intent.FLAG_ACTIVITY_NO_ANIMATION 
+                            | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                            | Intent.FLAG_ACTIVITY_SHOW_WHEN_LOCKED); // 強制表示フラグ追加
                     
                     context.startActivity(intent);
                     return null; // 元のシステム処理をキャンセル
@@ -140,53 +132,48 @@ public class LockscreenCamera extends XposedModule {
         }
     }
 
-    private void applyLockscreenFlags(Activity activity) {
+    /**
+     * 深層パッチ：Windowフラグ設定 + 内部booleanフィールドの強制上書き
+     * MIUI/HyperOSの匿名クラス・認証ポリシーチェックをフィールドレベルで無力化する
+     */
+    private void applyDeepPatches(Activity activity) {
         try {
+            // 1. 標準Windowフラグの徹底適用
             activity.setShowWhenLocked(true);
             activity.setTurnScreenOn(true);
-
-            Window win = activity.getWindow();            if (win != null) {
+            
+            Window win = activity.getWindow();
+            if (win != null) {
                 win.addFlags(
-                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
-                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
                     WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
                     WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
                 );
             }
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "Flags apply failed", t);
-        }
-    }
 
-    /**
-     * MIUI/HyperOS の内部 boolean フィールドを強制上書き
-     * キーガードやセキュア状態に関連するフィールドを true に倒し、描画拒否を防ぐ
-     */
-    private void forceFixInternalFields(Activity activity) {
-        Class<?> clazz = activity.getClass();
-        if (scannedClasses.contains(clazz)) return; // 既にスキャン済みのクラスはスキップ（パフォーマンス対策）
-
-        try {
-            Class<?> current = clazz;
-            while (current != null && !current.getName().equals("android.app.Activity")) {
-                for (Field f : current.getDeclaredFields()) {
-                    String name = f.getName().toLowerCase();
-                    // キーガード関連の boolean フィールドを抽出
-                    if ((name.contains("keyguard") || name.contains("secure") || name.contains("locked")) 
-                            && f.getType() == boolean.class) {
-                        try {
-                            f.setAccessible(true);
-                            // すべて true に設定して、MIUI の監視ロジックを欺く
-                            f.setBoolean(activity, true);
-                            log(Log.DEBUG, TAG, "Field Patched: " + f.getName());
-                        } catch (Throwable ignored) {}
+            // 2. フィールドの全スキャンと強制書き換え（パフォーマンス保護付き）
+            Class<?> current = activity.getClass();
+            if (!patchedClasses.contains(current)) {
+                while (current != null && !current.getName().equals("android.app.Activity")) {
+                    for (Field f : current.getDeclaredFields()) {
+                        String name = f.getName().toLowerCase();
+                        // SDK 36 で確認された認証/ポリシー関連キーワードを網羅
+                        if ((name.contains("secure") || name.contains("keyguard") || name.contains("locked") ||
+                             name.contains("showing") || name.contains("auth") || name.contains("policy") ||
+                             name.contains("permission")) && f.getType() == boolean.class) {
+                            try {
+                                f.setAccessible(true);
+                                f.setBoolean(activity, true); // 監視ロジックを欺くために true 固定
+                                log(Log.DEBUG, TAG, "Field Patched: " + f.getName());
+                            } catch (Throwable ignored) {}
+                        }
                     }
+                    current = current.getSuperclass();
                 }
-                current = current.getSuperclass();
+                patchedClasses.add(current); // キャッシュ登録
             }
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Field patch failed", t);
+            log(Log.ERROR, TAG, "Deep patch failed", t);
         }
-        scannedClasses.add(clazz);
     }
 }
