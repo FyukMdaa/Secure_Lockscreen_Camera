@@ -25,11 +25,12 @@ public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
 
-    // 【軽量化】全スキャン廃止。判定に直結するフィールドのみを狙い撃ち
+    // 【重要】ANR/リーク防止のため、判定に直結するフィールドのみを狙い撃ち
     private static final String[] TARGET_BOOLEAN_FIELDS = {
         "mIsSecure", "mIsSecureCamera", "mKeyguardLocked",
         "mInLockScreen", "mIgnoreKeyguard", "mIsScreenOn",
-        "mSecureCamera", "mIsKeyguardLocked", "mIsHideForeground", "mIsGalleryLock"
+        "mSecureCamera", "mIsKeyguardLocked", "mIsHideForeground", 
+        "mIsGalleryLock", "mIsCaptureIntent", "mIsPortraitIntent", "mIsVideoIntent"
     };
 
     public LockscreenCamera() {
@@ -42,18 +43,18 @@ public class LockscreenCamera extends XposedModule {
             return;
         }
 
-        log(Log.INFO, TAG, "Targeting com.android.camera (Optimized / Disconnect Fix)");
+        log(Log.INFO, TAG, "Targeting com.android.camera (Buffer Reset / Lite Mode)");
 
         // 1. KeyguardManager 偽装（システム認証チェック回避）
         try {
-            Class<?> kmClass = KeyguardManager.class;
-            hook(kmClass.getDeclaredMethod("isKeyguardLocked")).intercept(chain -> false);            hook(kmClass.getDeclaredMethod("isDeviceLocked")).intercept(chain -> false);
+            Class<?> kmClass = KeyguardManager.class;            hook(kmClass.getDeclaredMethod("isKeyguardLocked")).intercept(chain -> false);
+            hook(kmClass.getDeclaredMethod("isDeviceLocked")).intercept(chain -> false);
         } catch (Throwable ignored) {}
 
         // 2. Intent 保護（セキュアアクション維持）
         try {
             hook(Activity.class.getDeclaredMethod("setIntent", Intent.class)).intercept(chain -> {
-                Intent intent = (Intent) chain.getArgs().get(0);
+                Intent intent = (Intent) ((List<?>) chain.getArgs()).get(0);
                 if (intent != null) {
                     intent.setAction(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
                 }
@@ -61,7 +62,7 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 3. finish() ブロック＆真犯人特定
+        // 3. finish() 監視＋ブロック（真犯人特定）
         try {
             hook(Activity.class.getDeclaredMethod("finish")).intercept(chain -> {
                 log(Log.ERROR, TAG, "!!! Finish Attempted !!! Trace: " + Log.getStackTraceString(new Throwable()));
@@ -69,38 +70,33 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 4. 重要ライフサイクルフック（FLAG_SECURE クリア + 軽量パッチ）
-        String[] criticalMethods = {"onCreate", "onResume", "onWindowFocusChanged", "onPause", "onStop"};
-        for (String mname : criticalMethods) {
+        // 4. 描画パイプライン確定タイミングでのみパッチ適用（onCreate は避ける）
+        String[] bufferCriticalMethods = {"onStart", "onResume", "onWindowFocusChanged"};
+        for (String mname : bufferCriticalMethods) {
             try {
-                Method m;
-                if ("onCreate".equals(mname)) {
-                    m = Activity.class.getDeclaredMethod("onCreate", Bundle.class);
-                } else if ("onWindowFocusChanged".equals(mname)) {
-                    m = Activity.class.getDeclaredMethod("onWindowFocusChanged", boolean.class);
-                } else {
-                    m = Activity.class.getDeclaredMethod(mname);
-                }
+                Method m = "onWindowFocusChanged".equals(mname)
+                        ? Activity.class.getDeclaredMethod("onWindowFocusChanged", boolean.class)
+                        : Activity.class.getDeclaredMethod(mname);
 
                 hook(m).intercept(chain -> {
                     Activity act = (Activity) chain.getThisObject();
                     
-                    // OneTrack 等の分析コンポーネントは完全にスキップ（ANR 対策）
+                    // OneTrack 関連は即スキップ（ANR/リーク防止）
                     if (act.getClass().getName().contains("onetrack")) {
                         return chain.proceed();
                     }
 
                     if (act.getPackageName().equals("com.android.camera")) {
-                        // onPause/onStop はブロックせず、トレースのみ出力して proceed
-                        if ("onPause".equals(mname) || "onStop".equals(mname)) {
-                            log(Log.WARN, TAG, "!!! " + mname + " Called !!! Trace: " + Log.getStackTraceString(new Throwable()));
-                        }
-                        applyLitePatches(act);
-                    }                    return chain.proceed();
+                        // MIUI の初期化を先に通す
+                        Object res = chain.proceed();
+                        // ウィンドウ確定後にバッファ状態をリセット＆パッチ適用
+                        applyWindowAndBufferFixes(act);
+                        return res;
+                    }
+                    return chain.proceed();
                 });
             } catch (Throwable ignored) {}
-        }
-    }
+        }    }
 
     @Override
     public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
@@ -136,37 +132,39 @@ public class LockscreenCamera extends XposedModule {
     }
 
     /**
-     * 軽量パッチ：FLAG_SECURE クリア + 特定フィールド書き換え
+     * 描画パイプライン偽装：FLAG_SECURE クリア → フラグ再設定 → 最小限フィールドパッチ
+     * HardwareBuffer の強制解放を防ぐため、WindowManager の状態をリセットする
      */
-    private void applyLitePatches(Activity activity) {
+    private void applyWindowAndBufferFixes(Activity activity) {
         try {
-            activity.setShowWhenLocked(true);
-            activity.setTurnScreenOn(true);
-
             Window win = activity.getWindow();
             if (win != null) {
+                // 1. 厳格なセキュアチェックを一度解除（Buffer 破棄トリガーを無効化）
+                win.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+                
+                // 2. ロック画面フラグを再適用（SurfaceFlinger に「安全な割り当て」と誤認させる）
+                activity.setShowWhenLocked(true);
+                activity.setTurnScreenOn(true);
                 win.addFlags(                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
                     WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
                     WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
                     WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
                 );
-                // ★最重要：MIUIが設定するセキュアフラグを強制解除（CameraService切断防止）
-                win.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
             }
 
-            // 特定フィールドのピンポイント書き換え（高速）
+            // 3. 遅延パッチ：セッション権限判定に必要なフィールドのみ書き換え
             for (String fieldName : TARGET_BOOLEAN_FIELDS) {
                 setFieldIfExists(activity, fieldName, true);
             }
             setFieldIfExists(activity, "mKeyguardStatus", 1);
             
         } catch (Throwable t) {
-            log(Log.DEBUG, TAG, "Lite patch failed", t);
+            log(Log.DEBUG, TAG, "Buffer fix failed", t);
         }
     }
 
     /**
-     * 指定フィールドの親クラス探索＆値設定（全スキャン廃止でANR回避）
+     * 高速フィールド探索（全スキャン廃止。見つかり次第即終了）
      */
     private void setFieldIfExists(Object obj, String fieldName, Object value) {
         try {
