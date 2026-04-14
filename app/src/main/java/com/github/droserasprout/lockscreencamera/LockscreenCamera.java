@@ -15,23 +15,28 @@ import java.lang.reflect.Method;
 import java.util.HashSet;
 import java.util.Set;
 
+// 【修正 1】インポートの修正
+// ModuleLoaderParam は XposedModule の内部クラスです
 import io.github.libxposed.api.XposedModule;
-import io.github.libxposed.api.XposedModuleInterface.ModuleLoaderParam;
+import io.github.libxposed.api.XposedModule.ModuleLoaderParam;
+import io.github.libxposed.api.XposedModuleInterface;
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
-import io.github.libxposed.api.XposedModuleInterface.SystemServerReadyParam;
+// SystemServerReadyParam は存在しないため、標準の SystemServerLoadedParam を使用します
+import io.github.libxposed.api.XposedModuleInterface.SystemServerLoadedParam;
 
 public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
     private static final Set<Class<?>> appliedClasses = new HashSet<>();
 
-    // ModuleLoaderParam のインポート解決
+    // 【修正 1】コンストラクタの引数型を修正
     public LockscreenCamera(@NonNull ModuleLoaderParam param) {
         super(param);
     }
 
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
+        // ターゲットパッケージのみに限定
         if (!param.getPackageName().equals("com.android.camera")) {
             return;
         }
@@ -39,6 +44,7 @@ public class LockscreenCamera extends XposedModule {
         log(Log.INFO, TAG, "Targeting " + param.getPackageName());
 
         try {
+            // Activityのライフサイクルメソッドをフック
             String[] lifecycleMethods = {"onCreate", "onStart", "onResume"};
             for (String methodName : lifecycleMethods) {
                 Method method = methodName.equals("onCreate")
@@ -47,6 +53,7 @@ public class LockscreenCamera extends XposedModule {
 
                 hook(method).intercept(chain -> {
                     Activity activity = (Activity) chain.getThisObject();
+                    // パッケージチェック（スコープ外のActivity除外用）
                     if (activity.getPackageName().equals("com.android.camera")) {
                         applyLockscreenFlags(activity);
                         suppressKeyguardMethods(activity.getClass());
@@ -59,10 +66,10 @@ public class LockscreenCamera extends XposedModule {
         }
     }
 
+    // 【修正 2】onSystemServerReady -> onSystemServerLoaded (標準API準拠)
     @Override
-    // SystemServerReadyParam のインポート解決
-    public void onSystemServerReady(@NonNull SystemServerReadyParam param) {
-        log(Log.INFO, TAG, "System Server Ready: Hooking GestureLauncherService");
+    public void onSystemServerLoaded(@NonNull SystemServerLoadedParam param) {
+        log(Log.INFO, TAG, "System Server Loaded: Hooking GestureLauncherService");
 
         try {
             Class<?> gestureClass = param.getClassLoader().loadClass(
@@ -84,19 +91,25 @@ public class LockscreenCamera extends XposedModule {
                             | Intent.FLAG_ACTIVITY_NO_USER_ACTION);
                     
                     context.startActivity(intent);
-                    return null; // 元の処理をキャンセルして独自の起動のみ実行
+                    
+                    // 元の処理をキャンセルして独自の起動のみ実行（二重起動防止）
+                    return null;
                 } catch (Throwable t) {
                     log(Log.ERROR, TAG, "Failed to launch secure camera", t);
                 }
                 return chain.proceed();
             });
+        } catch (ClassNotFoundException | NoSuchMethodException e) {
+            log(Log.WARN, TAG, "GestureLauncherService not found", e);
         } catch (Throwable t) {
-            log(Log.WARN, TAG, "GestureLauncherService hook skipped", t);
+            log(Log.ERROR, TAG, "System server hook error", t);
         }
     }
 
+    // 【修正 3】Window フラグによる画面維持処理へ統合
     private void applyLockscreenFlags(Activity activity) {
         try {
+            // Android 8.1+ 標準API
             activity.setShowWhenLocked(true);
             activity.setTurnScreenOn(true);
 
@@ -105,8 +118,8 @@ public class LockscreenCamera extends XposedModule {
                 win.addFlags(
                     WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
                     WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
-                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD // MIUI監視回避の保険
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON | // setKeepScreenOn の代替
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD // ちらつき防止の保険
                 );
             }
         } catch (Throwable t) {
@@ -124,10 +137,12 @@ public class LockscreenCamera extends XposedModule {
         while (current != null && depth < MAX_DEPTH && !current.getName().equals("android.app.Activity")) {
             for (Method m : current.getDeclaredMethods()) {
                 String name = m.getName().toLowerCase();
+                // 引数が多すぎる、戻り値が複雑なメソッドは除外
                 if (m.getParameterTypes().length > 2) continue;
                 Class<?> ret = m.getReturnType();
                 if (ret != boolean.class && ret != void.class && ret != int.class) continue;
 
+                // keyguard, secure, camera 関連のメソッドをターゲット
                 if (name.contains("keyguard") || name.contains("secure") || name.contains("camera")) {
                     try {
                         hook(m).intercept(chain -> getSafeDefault(m));
@@ -145,7 +160,10 @@ public class LockscreenCamera extends XposedModule {
         String name = m.getName().toLowerCase();
 
         if (type == boolean.class) {
+            // typo修正: isseecure -> issecure
+            // セキュリティ/ロック状態を問うメソッド -> true で正常系と誤認させる
             if (name.contains("check") || name.contains("issecure") || name.contains("islocked")) return true;
+            // 表示終了系メソッド -> false で表示を維持
             if (name.contains("dismiss") || name.contains("hide") || name.contains("shouldfinish")) return false;
             return false;
         }
