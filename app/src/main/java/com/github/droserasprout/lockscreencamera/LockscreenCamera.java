@@ -111,14 +111,13 @@ public class LockscreenCamera extends XposedModule {
                     }
 
                     Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
-                    // 【強化】SDK 36 / HyperOS 対策のIntentフラグ
+                    // 【強化】Intentフラグ（存在しないフラグは削除済み）
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK 
                             | Intent.FLAG_ACTIVITY_CLEAR_TASK 
                             | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS 
                             | Intent.FLAG_ACTIVITY_NO_USER_ACTION
                             | Intent.FLAG_ACTIVITY_NO_ANIMATION 
-                            | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-                            | Intent.FLAG_ACTIVITY_SHOW_WHEN_LOCKED); // 強制表示フラグ追加
+                            | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
                     
                     context.startActivity(intent);
                     return null; // 元のシステム処理をキャンセル
@@ -145,8 +144,8 @@ public class LockscreenCamera extends XposedModule {
             Window win = activity.getWindow();
             if (win != null) {
                 win.addFlags(
-                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
                     WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
                 );
             }
