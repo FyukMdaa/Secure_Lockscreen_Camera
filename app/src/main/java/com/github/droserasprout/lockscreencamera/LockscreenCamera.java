@@ -25,20 +25,11 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
+    // 重複スキャン防止用キャッシュ
     private static final Set<Class<?>> scannedClasses = new HashSet<>();
 
     public LockscreenCamera() {
         super();
-    }
-
-    private static Method findMethod(Class<?> clazz, String name, Class<?>... params)
-            throws NoSuchMethodException {
-        Class<?> c = clazz;
-        while (c != null) {
-            try { return c.getDeclaredMethod(name, params); }
-            catch (NoSuchMethodException e) { c = c.getSuperclass(); }
-        }
-        throw new NoSuchMethodException(name);
     }
 
     @Override
@@ -47,58 +38,65 @@ public class LockscreenCamera extends XposedModule {
             return;
         }
 
-        log(Log.INFO, TAG, "Targeting com.android.camera (with Debug Hook)");
+        log(Log.INFO, TAG, "Targeting com.android.camera (Final Battle Code)");
 
-        // デバッグフック：setShowWhenLocked(false) を呼んでいる場所を特定
+        // 1. 【デバッグ用】setShowWhenLocked(false) の呼び出し元を特定
         try {
-            Method target = Activity.class.getDeclaredMethod("setShowWhenLocked", boolean.class);
-            hook(target).intercept(chain -> {
-                // 【修正】List<Object> なので .get(0) を使用
-                boolean show = (boolean) chain.getArgs().get(0);
-                if (!show) {
-                    log(Log.WARN, TAG, "!!! ALERT !!! setShowWhenLocked(false) called by: " + 
-                        Log.getStackTraceString(new Throwable()));
+            Method setter = Activity.class.getDeclaredMethod("setShowWhenLocked", boolean.class);
+            hook(setter).intercept(chain -> {
+                // 修正: List<Object> のため .get(0) を使用
+                boolean value = (boolean) chain.getArgs().get(0);
+                if (!value) {
+                    log(Log.ERROR, TAG, "!!! ALERT !!! setShowWhenLocked(false) called by: " +                         Log.getStackTraceString(new Throwable()));
                 }
                 return chain.proceed();
             });
         } catch (Throwable ignored) {}
 
-        try {
-            Class<?> cameraClass = Class.forName("com.android.camera.Camera", true, param.getClassLoader());
+        // 2. 【重要】ライフサイクルメソッドをフック
+        // onCreate, onResume に加え、onAttachedToWindow と onWindowFocusChanged を追加
+        // これにより、描画の直前で状態を確定させる
+        String[] persistentMethods = {"onCreate", "onResume", "onAttachedToWindow", "onWindowFocusChanged"};
 
-            String[] methods = {"onCreate", "onStart", "onResume"};
-            for (String methodName : methods) {
-                try {
-                    Method m = methodName.equals("onCreate") 
-                        ? findMethod(cameraClass, "onCreate", Bundle.class) 
-                        : findMethod(cameraClass, methodName);
+        for (String methodName : persistentMethods) {
+            try {
+                Method m;
+                if (methodName.equals("onCreate")) {
+                    m = Activity.class.getDeclaredMethod(methodName, Bundle.class);
+                } else if (methodName.equals("onWindowFocusChanged")) {
+                    m = Activity.class.getDeclaredMethod(methodName, boolean.class);
+                } else {
+                    m = Activity.class.getDeclaredMethod(methodName);
+                }
+
+                hook(m).intercept(chain -> {
+                    Activity activity = (Activity) chain.getThisObject();
                     
-                    hook(m).intercept(chain -> {
-                        Object res = chain.proceed();
-                        
-                        Activity activity = (Activity) chain.getThisObject();
+                    if (activity.getPackageName().equals("com.android.camera")) {
+                        // MIUI の判定を欺くために、処理前に強制的に内部状態を書き換える
+                        forceFixInternalFields(activity);
                         applyLockscreenFlags(activity);
-                        forceFixInternalState(activity);
-                        
-                        return res;
-                    });
-                } catch (Throwable ignored) {}
+                    }
+                    
+                    return chain.proceed();
+                });
+            } catch (Throwable ignored) {
+                // メソッドが存在しない場合は無視
             }
-
-            for (String methodName : new String[]{"checkKeyguard", "checkKeyguardFlag"}) {
-                try {
-                    Method m = findMethod(cameraClass, methodName);
-                    hook(m).intercept(chain -> {
-                        log(Log.DEBUG, TAG, "Suppressed method: " + methodName);
-                        if (m.getReturnType() == boolean.class) return false;
-                        return null;
-                    });
-                } catch (Throwable ignored) {}
-            }
-
-        } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Hook setup failed", t);
         }
+        
+        // 3. MIUI 固有のキーガードチェック無効化 (保険)
+        for (String methodName : new String[]{"checkKeyguard", "checkKeyguardFlag"}) {
+            try {
+                // checkKeyguard は ActivityBase などに存在する可能性が高いため、
+                // 見つからなくてもエラーにならないように try-catch しておく
+                Method m = Activity.class.getDeclaredMethod(methodName);
+                hook(m).intercept(chain -> {
+                    log(Log.DEBUG, TAG, "Suppressed method: " + methodName);
+                    if (m.getReturnType() == boolean.class) return false;
+                    return null;
+                });
+            } catch (Throwable ignored) {}        }
     }
 
     @Override
@@ -116,6 +114,7 @@ public class LockscreenCamera extends XposedModule {
                     Method getContextMethod = chain.getThisObject().getClass().getMethod("getContext");
                     Context context = (Context) getContextMethod.invoke(chain.getThisObject());
 
+                    // 鍵画面が出ていない場合は通常起動に任せる
                     KeyguardManager km = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
                     if (km != null && !km.isKeyguardLocked()) {
                         return chain.proceed();
@@ -130,7 +129,7 @@ public class LockscreenCamera extends XposedModule {
                             | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
                     
                     context.startActivity(intent);
-                    return null;
+                    return null; // 元のシステム処理をキャンセル
                 } catch (Throwable t) {
                     log(Log.ERROR, TAG, "Failed to launch secure camera", t);
                 }
@@ -146,8 +145,7 @@ public class LockscreenCamera extends XposedModule {
             activity.setShowWhenLocked(true);
             activity.setTurnScreenOn(true);
 
-            Window win = activity.getWindow();
-            if (win != null) {
+            Window win = activity.getWindow();            if (win != null) {
                 win.addFlags(
                     WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
                     WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
@@ -160,24 +158,27 @@ public class LockscreenCamera extends XposedModule {
         }
     }
 
-    private void forceFixInternalState(Activity activity) {
+    /**
+     * MIUI/HyperOS の内部 boolean フィールドを強制上書き
+     * キーガードやセキュア状態に関連するフィールドを true に倒し、描画拒否を防ぐ
+     */
+    private void forceFixInternalFields(Activity activity) {
         Class<?> clazz = activity.getClass();
-        if (scannedClasses.contains(clazz)) return;
+        if (scannedClasses.contains(clazz)) return; // 既にスキャン済みのクラスはスキップ（パフォーマンス対策）
 
         try {
             Class<?> current = clazz;
             while (current != null && !current.getName().equals("android.app.Activity")) {
                 for (Field f : current.getDeclaredFields()) {
                     String name = f.getName().toLowerCase();
+                    // キーガード関連の boolean フィールドを抽出
                     if ((name.contains("keyguard") || name.contains("secure") || name.contains("locked")) 
                             && f.getType() == boolean.class) {
                         try {
                             f.setAccessible(true);
-                            boolean oldVal = f.getBoolean(activity);
-                            if (!oldVal) {
-                                log(Log.INFO, TAG, "Patched field: " + f.getName() + " in " + current.getSimpleName() + " -> true");
-                                f.setBoolean(activity, true);
-                            }
+                            // すべて true に設定して、MIUI の監視ロジックを欺く
+                            f.setBoolean(activity, true);
+                            log(Log.DEBUG, TAG, "Field Patched: " + f.getName());
                         } catch (Throwable ignored) {}
                     }
                 }
