@@ -109,7 +109,7 @@ public class LockscreenCamera extends XposedModule {
                     "handleCameraGesture", boolean.class, int.class);
             hook(handleCameraGesture).intercept(chain -> {
                 log(Log.INFO, TAG, "suppressing GestureLauncherService.handleCameraGesture");
-                return null;
+                return Boolean.FALSE; 
             });
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "Error hooking GestureLauncherService", t);
@@ -142,7 +142,7 @@ public class LockscreenCamera extends XposedModule {
                 return null;
             });
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Error hooking PhoneWindowManager", t);
+            log(Log.ERROR, TAG, "Error hooking PhoneWindowManager: " + t.getMessage(), t);
         }
     }
 }
