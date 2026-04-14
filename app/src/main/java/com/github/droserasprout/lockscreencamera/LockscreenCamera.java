@@ -15,28 +15,26 @@ import java.lang.reflect.Method;
 import java.util.HashSet;
 import java.util.Set;
 
-// 【修正 1】インポートの修正
-// ModuleLoaderParam は XposedModule の内部クラスです
 import io.github.libxposed.api.XposedModule;
-import io.github.libxposed.api.XposedModule.ModuleLoaderParam;
 import io.github.libxposed.api.XposedModuleInterface;
+// 新APIの正しいパラメータクラスをインポート
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
-// SystemServerReadyParam は存在しないため、標準の SystemServerLoadedParam を使用します
-import io.github.libxposed.api.XposedModuleInterface.SystemServerLoadedParam;
+import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 
 public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
+    // 重複フック防止用のクラスキャッシュ
     private static final Set<Class<?>> appliedClasses = new HashSet<>();
 
-    // 【修正 1】コンストラクタの引数型を修正
-    public LockscreenCamera(@NonNull ModuleLoaderParam param) {
-        super(param);
+    // 【重要】新APIではコンストラクタに引数は不要です
+    public LockscreenCamera() {
+        super();
     }
 
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
-        // ターゲットパッケージのみに限定
+        // ターゲットパッケージ（MIUI Cameraなど）に限定
         if (!param.getPackageName().equals("com.android.camera")) {
             return;
         }
@@ -53,7 +51,7 @@ public class LockscreenCamera extends XposedModule {
 
                 hook(method).intercept(chain -> {
                     Activity activity = (Activity) chain.getThisObject();
-                    // パッケージチェック（スコープ外のActivity除外用）
+                    // スコープ外のActivityへの影響を防ぐため実行時に再チェック
                     if (activity.getPackageName().equals("com.android.camera")) {
                         applyLockscreenFlags(activity);
                         suppressKeyguardMethods(activity.getClass());
@@ -66,10 +64,10 @@ public class LockscreenCamera extends XposedModule {
         }
     }
 
-    // 【修正 2】onSystemServerReady -> onSystemServerLoaded (標準API準拠)
+    // 【重要】システムサーバーフックは onSystemServerStarting が公式仕様です
     @Override
-    public void onSystemServerLoaded(@NonNull SystemServerLoadedParam param) {
-        log(Log.INFO, TAG, "System Server Loaded: Hooking GestureLauncherService");
+    public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
+        log(Log.INFO, TAG, "System Server Starting: Hooking GestureLauncherService");
 
         try {
             Class<?> gestureClass = param.getClassLoader().loadClass(
@@ -100,13 +98,16 @@ public class LockscreenCamera extends XposedModule {
                 return chain.proceed();
             });
         } catch (ClassNotFoundException | NoSuchMethodException e) {
-            log(Log.WARN, TAG, "GestureLauncherService not found", e);
+            log(Log.WARN, TAG, "GestureLauncherService not found (ROM dependent)", e);
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "System server hook error", t);
         }
     }
 
-    // 【修正 3】Window フラグによる画面維持処理へ統合
+    /**
+     * ロック画面上での表示を維持するためのウィンドウフラグ適用
+     * FLAG_DISMISS_KEYGUARD を追加し、MIUIのキーガード再描画によるちらつきを抑制
+     */
     private void applyLockscreenFlags(Activity activity) {
         try {
             // Android 8.1+ 標準API
@@ -118,21 +119,24 @@ public class LockscreenCamera extends XposedModule {
                 win.addFlags(
                     WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
                     WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON | // setKeepScreenOn の代替
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON | // 画面オフ防止
                     WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD // ちらつき防止の保険
                 );
             }
         } catch (Throwable t) {
-            log(Log.DEBUG, TAG, "Flags apply failed", t);
+            log(Log.DEBUG, TAG, "Flags application skipped", t);
         }
     }
 
+    /**
+     * キーガード関連の監視メソッドを動的に検出し、戻り値を書き換えてカメラの強制終了を防ぐ
+     */
     private void suppressKeyguardMethods(Class<?> clazz) {
         if (appliedClasses.contains(clazz)) return;
         
         Class<?> current = clazz;
         int depth = 0;
-        final int MAX_DEPTH = 5;
+        final int MAX_DEPTH = 5; // スーパークラスの遡り制限
 
         while (current != null && depth < MAX_DEPTH && !current.getName().equals("android.app.Activity")) {
             for (Method m : current.getDeclaredMethods()) {
@@ -142,11 +146,13 @@ public class LockscreenCamera extends XposedModule {
                 Class<?> ret = m.getReturnType();
                 if (ret != boolean.class && ret != void.class && ret != int.class) continue;
 
-                // keyguard, secure, camera 関連のメソッドをターゲット
+                // keyguard / secure / camera 関連のメソッドをターゲット
                 if (name.contains("keyguard") || name.contains("secure") || name.contains("camera")) {
                     try {
                         hook(m).intercept(chain -> getSafeDefault(m));
-                    } catch (Throwable ignored) {}
+                    } catch (Throwable ignored) {
+                        // フック失敗時は無視
+                    }
                 }
             }
             current = current.getSuperclass();
@@ -155,19 +161,22 @@ public class LockscreenCamera extends XposedModule {
         appliedClasses.add(clazz);
     }
 
+    /**
+     * フックしたメソッドに対する安全なデフォルト戻り値を生成
+     * MIUIの監視ロジックを欺くために、特定の条件では true を返す
+     */
     private Object getSafeDefault(Method m) {
         Class<?> type = m.getReturnType();
         String name = m.getName().toLowerCase();
 
         if (type == boolean.class) {
-            // typo修正: isseecure -> issecure
-            // セキュリティ/ロック状態を問うメソッド -> true で正常系と誤認させる
+            // 「セキュアか」「ロック中か」を問うメソッド -> true を返して正常系と誤認させる
             if (name.contains("check") || name.contains("issecure") || name.contains("islocked")) return true;
-            // 表示終了系メソッド -> false で表示を維持
+            // 「閉じるべきか」「隠すべきか」を問うメソッド -> false を返して表示を維持させる
             if (name.contains("dismiss") || name.contains("hide") || name.contains("shouldfinish")) return false;
             return false;
         }
         if (type == int.class) return 0;
-        return null;
+        return null; // void や Object
     }
 }
