@@ -12,7 +12,10 @@ import android.view.WindowManager;
 
 import androidx.annotation.NonNull;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.HashSet;
+import java.util.Set;
 
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
@@ -22,13 +25,15 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
+    
+    // 重複スキャン・重複フック防止用キャッシュ
+    private static final Set<Class<?>> scannedClasses = new HashSet<>();
 
-    // 新APIでは引数なしのコンストラクタが標準です
     public LockscreenCamera() {
         super();
     }
 
-    /** クラス階層を遡ってメソッドを検索するヘルパー (CAM_ActivityBase 等の親クラス検索用) */
+    /** クラス階層を遡ってメソッドを検索するヘルパー */
     private static Method findMethod(Class<?> clazz, String name, Class<?>... params)
             throws NoSuchMethodException {
         Class<?> c = clazz;
@@ -51,20 +56,24 @@ public class LockscreenCamera extends XposedModule {
         log(Log.INFO, TAG, "Targeting com.android.camera");
 
         try {
-            // MIUI Camera のメイン Activity クラスを取得
             Class<?> cameraClass = Class.forName(
                     "com.android.camera.Camera", true, param.getClassLoader());
 
-            // 1. ライフサイクルフック（フラグ適用）
-            // findMethod を使用して、継承元（ActivityBaseなど）のメソッドを確実に捉える
+            // 1. onCreate フック（フラグ適用 ＋ 内部フィールド修正）
             Method onCreate = findMethod(cameraClass, "onCreate", Bundle.class);
             hook(onCreate).intercept(chain -> {
                 Activity activity = (Activity) chain.getThisObject();
+                
+                // ① 標準APIフラグを適用
                 applyLockscreenFlags(activity);
+                
+                // ② MIUI内部フィールドを上書き（初期化より先に実行）
+                scanAndFixInternalFields(activity);
+                
                 return chain.proceed();
             });
 
-            // onStart, onResume も同様に適用
+            // onStart / onResume でもフラグを再適用（ROM側で書き換えられた場合の保険）
             for (String methodName : new String[]{"onStart", "onResume"}) {
                 try {
                     Method m = findMethod(cameraClass, methodName);
@@ -73,27 +82,21 @@ public class LockscreenCamera extends XposedModule {
                         applyLockscreenFlags(activity);
                         return chain.proceed();
                     });
-                } catch (Throwable ignored) {
-                    // メソッドが見つからない場合は無視
-                }
+                } catch (Throwable ignored) {}
             }
 
-            // 2. 【MIUI 対策】checkKeyguard / checkKeyguardFlag の無効化
-            // MIUI の ActivityBase がこれらを通じて setShowWhenLocked(false) を実行するのをブロックする
+            // 2. MIUI 固有メソッドフック (checkKeyguard / checkKeyguardFlag)
             for (String methodName : new String[]{"checkKeyguard", "checkKeyguardFlag"}) {
                 try {
                     Method m = findMethod(cameraClass, methodName);
                     hook(m).intercept(chain -> {
-                        log(Log.INFO, TAG, "Suppressed MIUI keyguard check: " + methodName);
                         Class<?> retType = m.getReturnType();
-                        // カメラ終了要求（true）を無効化するために false を返す
+                        log(Log.INFO, TAG, "Suppressed method: " + methodName);
                         if (retType == boolean.class) return false;
                         if (retType == int.class) return 0;
-                        return null; // void または Object
+                        return null;
                     });
-                } catch (Throwable t) {
-                    // メソッドが存在しない場合は無視
-                }
+                } catch (Throwable ignored) {}
             }
 
         } catch (Throwable t) {
@@ -116,13 +119,12 @@ public class LockscreenCamera extends XposedModule {
                     Method getContextMethod = chain.getThisObject().getClass().getMethod("getContext");
                     Context context = (Context) getContextMethod.invoke(chain.getThisObject());
 
-                    // 【修正】ホーム画面など、鍵画面が出ていない場合は通常起動に任せる
+                    // ホーム画面など鍵画面が出ていない場合は通常起動にフォールバック
                     KeyguardManager km = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
                     if (km != null && !km.isKeyguardLocked()) {
-                        return chain.proceed(); // 通常通りシステム処理へ
+                        return chain.proceed();
                     }
 
-                    // ロック画面からの起動の場合のみセキュアインテントで起動
                     Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK 
                             | Intent.FLAG_ACTIVITY_CLEAR_TASK 
@@ -143,7 +145,6 @@ public class LockscreenCamera extends XposedModule {
 
     private void applyLockscreenFlags(Activity activity) {
         try {
-            // Android 8.1+ 標準API
             activity.setShowWhenLocked(true);
             activity.setTurnScreenOn(true);
 
@@ -152,12 +153,47 @@ public class LockscreenCamera extends XposedModule {
                 win.addFlags(
                     WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
                     WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON | // 【修正】ここで画面維持を行う
-                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD // ちらつき防止の保険
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
                 );
             }
         } catch (Throwable t) {
             log(Log.WARN, TAG, "Flags apply failed", t);
         }
+    }
+
+    /** 
+     * Gemini 提案：内部 boolean フィールドのスキャン＆強制上書き
+     * MIUIの難読化フィールド（例: mIsKeyguardBlocked, mSecureMode等）を直接制御する
+     */
+    private void scanAndFixInternalFields(Activity activity) {
+        Class<?> clazz = activity.getClass();
+        // 同じクラスは一度だけスキャン（パフォーマンス保護）
+        if (scannedClasses.contains(clazz)) return;
+
+        try {
+            Class<?> current = clazz;
+            while (current != null && !current.getName().equals("android.app.Activity")) {
+                for (Field f : current.getDeclaredFields()) {
+                    String name = f.getName().toLowerCase();
+                    // キーガード関連の boolean フィールドを抽出
+                    if ((name.contains("keyguard") || name.contains("secure") || name.contains("locked")) 
+                            && f.getType() == boolean.class) {
+                        try {
+                            f.setAccessible(true);
+                            boolean oldVal = f.getBoolean(activity);
+                            log(Log.DEBUG, TAG, "Field scan: " + f.getName() + " in " + clazz.getSimpleName() 
+                                    + " | old=" + oldVal + " -> force=true");
+                            // 全て true に設定。もし不具合が出る場合はログを見て特定フィールドのみ false に調整
+                            f.setBoolean(activity, true);
+                        } catch (Throwable ignored) {}
+                    }
+                }
+                current = current.getSuperclass();
+            }
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "Field scan failed", t);
+        }
+        scannedClasses.add(clazz);
     }
 }
