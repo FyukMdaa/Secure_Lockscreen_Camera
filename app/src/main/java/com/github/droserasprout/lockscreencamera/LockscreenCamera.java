@@ -13,8 +13,6 @@ import android.view.WindowManager;
 import androidx.annotation.NonNull;
 
 import java.lang.reflect.Method;
-import java.util.HashSet;
-import java.util.Set;
 
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
@@ -24,10 +22,23 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
-    private static final Set<Class<?>> appliedClasses = new HashSet<>();
 
     public LockscreenCamera() {
         super();
+    }
+
+    /** クラス階層を遡ってメソッドを検索するヘルパー */
+    private static Method findMethod(Class<?> clazz, String name, Class<?>... params)
+            throws NoSuchMethodException {
+        Class<?> c = clazz;
+        while (c != null) {
+            try {
+                return c.getDeclaredMethod(name, params);
+            } catch (NoSuchMethodException e) {
+                c = c.getSuperclass();
+            }
+        }
+        throw new NoSuchMethodException(name);
     }
 
     @Override
@@ -36,42 +47,52 @@ public class LockscreenCamera extends XposedModule {
             return;
         }
 
-        log(Log.INFO, TAG, "Targeting " + param.getPackageName());
+        log(Log.INFO, TAG, "Targeting com.android.camera");
 
         try {
-            String[] lifecycleMethods = {"onCreate", "onStart", "onResume"};
-            for (String methodName : lifecycleMethods) {
-                Method method = methodName.equals("onCreate")
-                        ? Activity.class.getDeclaredMethod(methodName, Bundle.class)
-                        : Activity.class.getDeclaredMethod(methodName);
+            // MIUI Camera のメイン Activity をターゲット
+            Class<?> cameraClass = Class.forName(
+                    "com.android.camera.Camera", true, param.getClassLoader());
 
-                hook(method).intercept(chain -> {
-                    Activity activity = (Activity) chain.getThisObject();
-                    Intent intent = activity.getIntent();
-                    
-                    // ロック画面からの起動かどうかを判定
-                    boolean isSecureLaunch = intent != null && 
-                            MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE.equals(intent.getAction());
+            // 1. ライフサイクルフック（フラグ適用）
+            Method onCreate = findMethod(cameraClass, "onCreate", Bundle.class);
+            hook(onCreate).intercept(chain -> {
+                Activity activity = (Activity) chain.getThisObject();
+                applyLockscreenFlags(activity);
+                return chain.proceed();
+            });
 
-                    if ("onCreate".equals(methodName)) {
-                        if (isSecureLaunch) {
-                            // 1. onCreat eではフラグのみ適用（初期化を妨げない）
-                            applyLockscreenFlags(activity);
-                        }
-                        // chain.proceed() で通常の初期化を先に実行させ、NPEを回避
+            for (String methodName : new String[]{"onStart", "onResume"}) {
+                try {
+                    Method m = findMethod(cameraClass, methodName);
+                    hook(m).intercept(chain -> {
+                        Activity activity = (Activity) chain.getThisObject();
+                        applyLockscreenFlags(activity);
                         return chain.proceed();
-                    }
-
-                    if (("onStart".equals(methodName) || "onResume".equals(methodName)) && isSecureLaunch) {
-                        // 2. 初期化完了後のタイミングで監視メソッド抑制を実行
-                        suppressKeyguardMethods(activity.getClass());
-                    }
-                    
-                    return chain.proceed();
-                });
+                    });
+                } catch (Throwable ignored) {}
             }
+
+            // 2. 【核心修正】MIUI の checkKeyguard / checkKeyguardFlag を無効化
+            // これらが setShowWhenLocked(false) を呼ぶのをブロックする
+            for (String methodName : new String[]{"checkKeyguard", "checkKeyguardFlag"}) {
+                try {
+                    Method m = findMethod(cameraClass, methodName);
+                    hook(m).intercept(chain -> {
+                        log(Log.INFO, TAG, "Suppressed MIUI keyguard check: " + methodName);
+                        Class<?> retType = m.getReturnType();
+                        // 戻り値型に応じて安全なデフォルトを返す
+                        if (retType == boolean.class) return false; // カメラ終了要求を無効化
+                        if (retType == int.class) return 0;
+                        return null; // void または Object
+                    });
+                } catch (Throwable t) {
+                    log(Log.WARN, TAG, "Method not found or hook failed: " + methodName);
+                }
+            }
+
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Failed to hook Activity lifecycle", t);
+            log(Log.ERROR, TAG, "Failed to hook camera activity", t);
         }
     }
 
@@ -80,19 +101,17 @@ public class LockscreenCamera extends XposedModule {
         log(Log.INFO, TAG, "System Server Starting: Hooking GestureLauncherService");
 
         try {
-            Class<?> gestureClass = param.getClassLoader().loadClass(
-                    "com.android.server.GestureLauncherService");
-            
+            Class<?> gestureClass = Class.forName(
+                    "com.android.server.GestureLauncherService", true, param.getClassLoader());
             Method handleCameraGesture = gestureClass.getDeclaredMethod(
                     "handleCameraGesture", boolean.class, int.class);
 
             hook(handleCameraGesture).intercept(chain -> {
-                log(Log.INFO, TAG, "Intercepted GestureLauncherService.handleCameraGesture");
                 try {
                     Method getContextMethod = chain.getThisObject().getClass().getMethod("getContext");
                     Context context = (Context) getContextMethod.invoke(chain.getThisObject());
 
-                    // 【修正】ホーム画面など、ロック画面が出ていない場合は通常起動に任せる
+                    // 【修正】ホーム画面など、鍵画面が出ていない場合は通常起動に任せる（問題点2の解決）
                     KeyguardManager km = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
                     if (km != null && !km.isKeyguardLocked()) {
                         return chain.proceed();
@@ -105,7 +124,7 @@ public class LockscreenCamera extends XposedModule {
                             | Intent.FLAG_ACTIVITY_NO_USER_ACTION);
                     
                     context.startActivity(intent);
-                    return null; // 元の処理をキャンセル
+                    return null; // 元のシステム処理をキャンセル
                 } catch (Throwable t) {
                     log(Log.ERROR, TAG, "Failed to launch secure camera", t);
                 }
@@ -120,6 +139,7 @@ public class LockscreenCamera extends XposedModule {
         try {
             activity.setShowWhenLocked(true);
             activity.setTurnScreenOn(true);
+            activity.setKeepScreenOn(true);
 
             Window win = activity.getWindow();
             if (win != null) {
@@ -131,53 +151,7 @@ public class LockscreenCamera extends XposedModule {
                 );
             }
         } catch (Throwable t) {
-            log(Log.DEBUG, TAG, "Flags apply failed", t);
+            log(Log.WARN, TAG, "Flags apply failed", t);
         }
-    }
-
-    private void suppressKeyguardMethods(Class<?> clazz) {
-        if (appliedClasses.contains(clazz)) return;
-        
-        Class<?> current = clazz;
-        int depth = 0;
-        final int MAX_DEPTH = 5;
-
-        while (current != null && depth < MAX_DEPTH && !current.getName().equals("android.app.Activity")) {
-            for (Method m : current.getDeclaredMethods()) {
-                String name = m.getName().toLowerCase();
-                
-                // ライフサイクルメソッドや内部初期化メソッドのフックを明示的に除外
-                if (name.startsWith("oncreate") || name.startsWith("onstart") || 
-                    name.startsWith("onresume") || name.contains("init") || name.contains("setup")) continue;
-
-                if (m.getParameterTypes().length > 2) continue;
-                Class<?> ret = m.getReturnType();
-                if (ret != boolean.class && ret != void.class && ret != int.class) continue;
-
-                // 【修正】"camera" の除外を削除し、keyguard/secure のみに厳格化
-                // (initCamera 等のカメラ処理を潰すのを防ぐため)
-                if (name.contains("keyguard") || name.contains("secure")) {
-                    try {
-                        hook(m).intercept(chain -> getSafeDefault(m));
-                    } catch (Throwable ignored) {}
-                }
-            }
-            current = current.getSuperclass();
-            depth++;
-        }
-        appliedClasses.add(clazz);
-    }
-
-    private Object getSafeDefault(Method m) {
-        Class<?> type = m.getReturnType();
-        String name = m.getName().toLowerCase();
-
-        if (type == boolean.class) {
-            if (name.contains("check") || name.contains("issecure") || name.contains("islocked")) return true;
-            if (name.contains("dismiss") || name.contains("hide") || name.contains("shouldfinish")) return false;
-            return false;
-        }
-        if (type == int.class) return 0;
-        return null;
     }
 }
