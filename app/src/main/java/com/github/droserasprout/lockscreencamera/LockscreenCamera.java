@@ -25,10 +25,11 @@ public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
 
-    // 書き換え対象のフィールド名リスト（全スキャンをやめて狙い撃ちにする）
+    // 【軽量化】全スキャンを廃止し、このリストにあるフィールドのみを狙い撃ちする
     private static final String[] TARGET_BOOLEAN_FIELDS = {
-        "mIsSecure", "mIsSecureCamera", "mKeyguardLocked", 
-        "mInLockScreen", "mIgnoreKeyguard", "mIsScreenOn"
+        "mIsSecure", "mIsSecureCamera", "mKeyguardLocked",
+        "mInLockScreen", "mIgnoreKeyguard", "mIsScreenOn",
+        "mSecureCamera", "mIsKeyguardLocked"
     };
 
     public LockscreenCamera() {
@@ -41,10 +42,9 @@ public class LockscreenCamera extends XposedModule {
             return;
         }
 
-        log(Log.INFO, TAG, "Targeting com.android.camera (Lite/Optimized Mode)");
+        log(Log.INFO, TAG, "Targeting com.android.camera (Lite Mode / ANR Fix)");
 
-        // 1. KeyguardManager 偽装（システム制約回避）
-        // 軽量なメソッド置き換えのみ
+        // 1. KeyguardManager 偽装（システム判定回避）
         try {
             Class<?> kmClass = KeyguardManager.class;
             hook(kmClass.getDeclaredMethod("isKeyguardLocked")).intercept(chain -> false);            hook(kmClass.getDeclaredMethod("isDeviceLocked")).intercept(chain -> false);
@@ -61,24 +61,24 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 3. 強制終了阻止（finish ブロック）
+        // 3. finish() フック（真犯人特定 + 終了ブロック）
         try {
             hook(Activity.class.getDeclaredMethod("finish")).intercept(chain -> {
-                // 終了をブロック
-                log(Log.WARN, TAG, "Blocked finish()");
+                // ★ここが重要：誰が finish を呼んだかログに残す
+                log(Log.ERROR, TAG, "!!! Finish Attempted !!! Trace: " + Log.getStackTraceString(new Throwable()));
+                // 呼び出しをキャンセル（null を返して chain.proceed() を呼ばない）
                 return null;
             });
         } catch (Throwable ignored) {}
 
-        // 4. ライフサイクルフック（onCreate, onResume, onWindowFocusChanged）
-        // 負荷を下げるため、onPostCreate 等は削り、重要なタイミングに集中
+        // 4. ライフサイクルフック（軽量パッチ適用）
         String[] criticalMethods = {"onCreate", "onResume", "onWindowFocusChanged"};
         for (String mname : criticalMethods) {
             try {
                 Method m;
-                if (mname.equals("onCreate")) {
+                if ("onCreate".equals(mname)) {
                     m = Activity.class.getDeclaredMethod("onCreate", Bundle.class);
-                } else if (mname.equals("onWindowFocusChanged")) {
+                } else if ("onWindowFocusChanged".equals(mname)) {
                     m = Activity.class.getDeclaredMethod("onWindowFocusChanged", boolean.class);
                 } else {
                     m = Activity.class.getDeclaredMethod(mname);
@@ -86,8 +86,8 @@ public class LockscreenCamera extends XposedModule {
 
                 hook(m).intercept(chain -> {
                     Activity act = (Activity) chain.getThisObject();
-                    // パッケージチェック
                     if (act.getPackageName().equals("com.android.camera")) {
+                        // ここで軽量パッチを実行
                         applyLitePatches(act);
                     }
                     return chain.proceed();
@@ -97,7 +97,6 @@ public class LockscreenCamera extends XposedModule {
     }
 
     @Override    public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
-        // ... (ジェスチャー起動処理は前回と同じ) ...
         try {
             Class<?> gestureClass = Class.forName(
                     "com.android.server.GestureLauncherService", true, param.getClassLoader());
@@ -130,11 +129,11 @@ public class LockscreenCamera extends XposedModule {
     }
 
     /**
-     * 軽量パッチ：重い全スキャンを廃止し、重要フィールドのみピンポイントで書き換え
+     * 軽量パッチ：重いスキャンを廃止し、特定フィールドのみ書き換え
      */
     private void applyLitePatches(Activity activity) {
         try {
-            // 1. 標準フラグ適用（毎回実行）
+            // 1. 標準フラグ適用
             activity.setShowWhenLocked(true);
             activity.setTurnScreenOn(true);
             
@@ -145,34 +144,31 @@ public class LockscreenCamera extends XposedModule {
                     WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
                     WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
                     WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
-                );            }
-
-            // 2. 重要フィールドのピンポイント書き換え（高速化のため全スキャン廃止）
+                );
+            }
+            // 2. 特定フィールドの書き換え（高速）
             for (String fieldName : TARGET_BOOLEAN_FIELDS) {
                 setFieldIfExists(activity, fieldName, true);
             }
-            // Integer 型のフィールドも対象
-            setFieldIfExists(activity, "mKeyguardStatus", 1);
             
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Lite patch failed", t);
+            log(Log.DEBUG, TAG, "Lite patch failed", t);
         }
     }
 
     /**
-     * フィールドが存在すれば書き換えるヘルパーメソッド
-     * 親クラスも辿るが、見つかった時点で終了するため高速
+     * 指定された名前のフィールドを探して値を設定する（親クラスも探索）
+     * 全フィールドのスキャンを行わないため、ANR を発生させない
      */
     private void setFieldIfExists(Object obj, String fieldName, Object value) {
         try {
             Class<?> current = obj.getClass();
-            while (current != null) {
+            while (current != null && !current.getName().equals("android.app.Activity")) {
                 try {
                     Field f = current.getDeclaredField(fieldName);
                     f.setAccessible(true);
                     f.set(obj, value);
-                    // log(Log.DEBUG, TAG, "Patched: " + fieldName); // 負荷軽減のためログは最小限
-                    return; // 成功したら探索終了
+                    return; // 見つかったら即座に終了
                 } catch (NoSuchFieldException e) {
                     current = current.getSuperclass();
                 }
