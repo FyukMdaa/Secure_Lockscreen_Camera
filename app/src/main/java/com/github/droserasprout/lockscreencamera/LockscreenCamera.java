@@ -25,11 +25,11 @@ public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
 
-    // 【軽量化】全スキャンを廃止し、このリストにあるフィールドのみを狙い撃ちする
+    // 【軽量化】全スキャン廃止。判定に直結するフィールドのみを狙い撃ち
     private static final String[] TARGET_BOOLEAN_FIELDS = {
         "mIsSecure", "mIsSecureCamera", "mKeyguardLocked",
         "mInLockScreen", "mIgnoreKeyguard", "mIsScreenOn",
-        "mSecureCamera", "mIsKeyguardLocked"
+        "mSecureCamera", "mIsKeyguardLocked", "mIsHideForeground", "mIsGalleryLock"
     };
 
     public LockscreenCamera() {
@@ -42,9 +42,9 @@ public class LockscreenCamera extends XposedModule {
             return;
         }
 
-        log(Log.INFO, TAG, "Targeting com.android.camera (Lite Mode / ANR Fix)");
+        log(Log.INFO, TAG, "Targeting com.android.camera (Optimized / Disconnect Fix)");
 
-        // 1. KeyguardManager 偽装（システム判定回避）
+        // 1. KeyguardManager 偽装（システム認証チェック回避）
         try {
             Class<?> kmClass = KeyguardManager.class;
             hook(kmClass.getDeclaredMethod("isKeyguardLocked")).intercept(chain -> false);            hook(kmClass.getDeclaredMethod("isDeviceLocked")).intercept(chain -> false);
@@ -53,7 +53,7 @@ public class LockscreenCamera extends XposedModule {
         // 2. Intent 保護（セキュアアクション維持）
         try {
             hook(Activity.class.getDeclaredMethod("setIntent", Intent.class)).intercept(chain -> {
-                Intent intent = (Intent) ((List<?>) chain.getArgs()).get(0);
+                Intent intent = (Intent) chain.getArgs().get(0);
                 if (intent != null) {
                     intent.setAction(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
                 }
@@ -61,18 +61,16 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 3. finish() フック（真犯人特定 + 終了ブロック）
+        // 3. finish() ブロック＆真犯人特定
         try {
             hook(Activity.class.getDeclaredMethod("finish")).intercept(chain -> {
-                // ★ここが重要：誰が finish を呼んだかログに残す
                 log(Log.ERROR, TAG, "!!! Finish Attempted !!! Trace: " + Log.getStackTraceString(new Throwable()));
-                // 呼び出しをキャンセル（null を返して chain.proceed() を呼ばない）
-                return null;
+                return null; // 終了処理をキャンセル
             });
         } catch (Throwable ignored) {}
 
-        // 4. ライフサイクルフック（軽量パッチ適用）
-        String[] criticalMethods = {"onCreate", "onResume", "onWindowFocusChanged"};
+        // 4. 重要ライフサイクルフック（FLAG_SECURE クリア + 軽量パッチ）
+        String[] criticalMethods = {"onCreate", "onResume", "onWindowFocusChanged", "onPause", "onStop"};
         for (String mname : criticalMethods) {
             try {
                 Method m;
@@ -86,17 +84,26 @@ public class LockscreenCamera extends XposedModule {
 
                 hook(m).intercept(chain -> {
                     Activity act = (Activity) chain.getThisObject();
-                    if (act.getPackageName().equals("com.android.camera")) {
-                        // ここで軽量パッチを実行
-                        applyLitePatches(act);
+                    
+                    // OneTrack 等の分析コンポーネントは完全にスキップ（ANR 対策）
+                    if (act.getClass().getName().contains("onetrack")) {
+                        return chain.proceed();
                     }
-                    return chain.proceed();
+
+                    if (act.getPackageName().equals("com.android.camera")) {
+                        // onPause/onStop はブロックせず、トレースのみ出力して proceed
+                        if ("onPause".equals(mname) || "onStop".equals(mname)) {
+                            log(Log.WARN, TAG, "!!! " + mname + " Called !!! Trace: " + Log.getStackTraceString(new Throwable()));
+                        }
+                        applyLitePatches(act);
+                    }                    return chain.proceed();
                 });
             } catch (Throwable ignored) {}
         }
     }
 
-    @Override    public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
+    @Override
+    public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
         try {
             Class<?> gestureClass = Class.forName(
                     "com.android.server.GestureLauncherService", true, param.getClassLoader());
@@ -129,27 +136,29 @@ public class LockscreenCamera extends XposedModule {
     }
 
     /**
-     * 軽量パッチ：重いスキャンを廃止し、特定フィールドのみ書き換え
+     * 軽量パッチ：FLAG_SECURE クリア + 特定フィールド書き換え
      */
     private void applyLitePatches(Activity activity) {
         try {
-            // 1. 標準フラグ適用
             activity.setShowWhenLocked(true);
             activity.setTurnScreenOn(true);
-            
+
             Window win = activity.getWindow();
             if (win != null) {
-                win.addFlags(
-                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                win.addFlags(                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
                     WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
                     WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
                     WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
                 );
+                // ★最重要：MIUIが設定するセキュアフラグを強制解除（CameraService切断防止）
+                win.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
             }
-            // 2. 特定フィールドの書き換え（高速）
+
+            // 特定フィールドのピンポイント書き換え（高速）
             for (String fieldName : TARGET_BOOLEAN_FIELDS) {
                 setFieldIfExists(activity, fieldName, true);
             }
+            setFieldIfExists(activity, "mKeyguardStatus", 1);
             
         } catch (Throwable t) {
             log(Log.DEBUG, TAG, "Lite patch failed", t);
@@ -157,8 +166,7 @@ public class LockscreenCamera extends XposedModule {
     }
 
     /**
-     * 指定された名前のフィールドを探して値を設定する（親クラスも探索）
-     * 全フィールドのスキャンを行わないため、ANR を発生させない
+     * 指定フィールドの親クラス探索＆値設定（全スキャン廃止でANR回避）
      */
     private void setFieldIfExists(Object obj, String fieldName, Object value) {
         try {
@@ -168,7 +176,7 @@ public class LockscreenCamera extends XposedModule {
                     Field f = current.getDeclaredField(fieldName);
                     f.setAccessible(true);
                     f.set(obj, value);
-                    return; // 見つかったら即座に終了
+                    return; // 成功即終了
                 } catch (NoSuchFieldException e) {
                     current = current.getSuperclass();
                 }
