@@ -23,11 +23,12 @@ public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
 
+    // 新APIでは引数なしのコンストラクタが標準です
     public LockscreenCamera() {
         super();
     }
 
-    /** クラス階層を遡ってメソッドを検索するヘルパー */
+    /** クラス階層を遡ってメソッドを検索するヘルパー (CAM_ActivityBase 等の親クラス検索用) */
     private static Method findMethod(Class<?> clazz, String name, Class<?>... params)
             throws NoSuchMethodException {
         Class<?> c = clazz;
@@ -50,11 +51,12 @@ public class LockscreenCamera extends XposedModule {
         log(Log.INFO, TAG, "Targeting com.android.camera");
 
         try {
-            // MIUI Camera のメイン Activity をターゲット
+            // MIUI Camera のメイン Activity クラスを取得
             Class<?> cameraClass = Class.forName(
                     "com.android.camera.Camera", true, param.getClassLoader());
 
             // 1. ライフサイクルフック（フラグ適用）
+            // findMethod を使用して、継承元（ActivityBaseなど）のメソッドを確実に捉える
             Method onCreate = findMethod(cameraClass, "onCreate", Bundle.class);
             hook(onCreate).intercept(chain -> {
                 Activity activity = (Activity) chain.getThisObject();
@@ -62,6 +64,7 @@ public class LockscreenCamera extends XposedModule {
                 return chain.proceed();
             });
 
+            // onStart, onResume も同様に適用
             for (String methodName : new String[]{"onStart", "onResume"}) {
                 try {
                     Method m = findMethod(cameraClass, methodName);
@@ -70,24 +73,26 @@ public class LockscreenCamera extends XposedModule {
                         applyLockscreenFlags(activity);
                         return chain.proceed();
                     });
-                } catch (Throwable ignored) {}
+                } catch (Throwable ignored) {
+                    // メソッドが見つからない場合は無視
+                }
             }
 
-            // 2. 【核心修正】MIUI の checkKeyguard / checkKeyguardFlag を無効化
-            // これらが setShowWhenLocked(false) を呼ぶのをブロックする
+            // 2. 【MIUI 対策】checkKeyguard / checkKeyguardFlag の無効化
+            // MIUI の ActivityBase がこれらを通じて setShowWhenLocked(false) を実行するのをブロックする
             for (String methodName : new String[]{"checkKeyguard", "checkKeyguardFlag"}) {
                 try {
                     Method m = findMethod(cameraClass, methodName);
                     hook(m).intercept(chain -> {
                         log(Log.INFO, TAG, "Suppressed MIUI keyguard check: " + methodName);
                         Class<?> retType = m.getReturnType();
-                        // 戻り値型に応じて安全なデフォルトを返す
-                        if (retType == boolean.class) return false; // カメラ終了要求を無効化
+                        // カメラ終了要求（true）を無効化するために false を返す
+                        if (retType == boolean.class) return false;
                         if (retType == int.class) return 0;
                         return null; // void または Object
                     });
                 } catch (Throwable t) {
-                    log(Log.WARN, TAG, "Method not found or hook failed: " + methodName);
+                    // メソッドが存在しない場合は無視
                 }
             }
 
@@ -111,12 +116,13 @@ public class LockscreenCamera extends XposedModule {
                     Method getContextMethod = chain.getThisObject().getClass().getMethod("getContext");
                     Context context = (Context) getContextMethod.invoke(chain.getThisObject());
 
-                    // 【修正】ホーム画面など、鍵画面が出ていない場合は通常起動に任せる（問題点2の解決）
+                    // 【修正】ホーム画面など、鍵画面が出ていない場合は通常起動に任せる
                     KeyguardManager km = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
                     if (km != null && !km.isKeyguardLocked()) {
-                        return chain.proceed();
+                        return chain.proceed(); // 通常通りシステム処理へ
                     }
 
+                    // ロック画面からの起動の場合のみセキュアインテントで起動
                     Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK 
                             | Intent.FLAG_ACTIVITY_CLEAR_TASK 
@@ -137,17 +143,17 @@ public class LockscreenCamera extends XposedModule {
 
     private void applyLockscreenFlags(Activity activity) {
         try {
+            // Android 8.1+ 標準API
             activity.setShowWhenLocked(true);
             activity.setTurnScreenOn(true);
-            activity.setKeepScreenOn(true);
 
             Window win = activity.getWindow();
             if (win != null) {
                 win.addFlags(
                     WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
                     WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
-                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON | // 【修正】ここで画面維持を行う
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD // ちらつき防止の保険
                 );
             }
         } catch (Throwable t) {
