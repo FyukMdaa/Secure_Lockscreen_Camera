@@ -25,6 +25,7 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
+    // 重複フィールドスキャン防止用キャッシュ
     private static final Set<Class<?>> patchedClasses = new HashSet<>();
 
     public LockscreenCamera() {
@@ -42,26 +43,29 @@ public class LockscreenCamera extends XposedModule {
         // 1. デバッグトラップ：setShowWhenLocked(false) の呼び出し元特定
         try {
             hook(Activity.class.getDeclaredMethod("setShowWhenLocked", boolean.class)).intercept(chain -> {
+                // chain.getArgs() は List<Object> を返すため .get(0) を使用
                 boolean val = (boolean) chain.getArgs().get(0);
                 if (!val) {
                     log(Log.ERROR, TAG, "!!! ALERT !!! setShowWhenLocked(false) called: " + Log.getStackTraceString(new Throwable()));
-                }
-                return chain.proceed();
-            });        } catch (Throwable ignored) {}
+                }                return chain.proceed();
+            });
+        } catch (Throwable ignored) {}
 
-        // 2. 【新】強制終了阻止フック：MIUI が finish() を呼ぶのをブロックし、スタックトレースを出力
+        // 2. 【重要】強制終了阻止フック：MIUI が finish() を呼ぶのをブロック
         try {
             hook(Activity.class.getDeclaredMethod("finish")).intercept(chain -> {
                 Activity act = (Activity) chain.getThisObject();
                 if (act.getPackageName().equals("com.android.camera")) {
+                    // finish() を無視してアプリが終了するのを防ぐ
                     log(Log.WARN, TAG, "!!! BLOCKED !!! MIUI attempted to finish camera: " + Log.getStackTraceString(new Throwable()));
-                    return null; // 強制終了を無視（void メソッドは null を返すことでスキップ）
+                    // void メソッドなので、proceed() を呼ばずに null を返すことで実行をキャンセル
+                    return null; 
                 }
                 return chain.proceed();
             });
         } catch (Throwable ignored) {}
 
-        // 3. 【新】KeyguardManager 判定偽装：システムに「ロック状態だがセキュア許可済み」と誤認させる
+        // 3. KeyguardManager 判定偽装：システムに「ロック状態だがセキュア許可済み」と誤認させる
         try {
             Class<?> kmClass = KeyguardManager.class;
             hook(kmClass.getDeclaredMethod("isDeviceLocked")).intercept(chain -> false);
@@ -72,12 +76,13 @@ public class LockscreenCamera extends XposedModule {
         String[] criticalMethods = {"onCreate", "onPostCreate", "onResume", "onAttachedToWindow", "onWindowFocusChanged"};
         for (String mname : criticalMethods) {
             try {
-                Method m = switch (mname) {
-                    case "onCreate" -> Activity.class.getDeclaredMethod("onCreate", Bundle.class);
-                    case "onPostCreate" -> Activity.class.getDeclaredMethod("onPostCreate", Bundle.class);
-                    case "onWindowFocusChanged" -> Activity.class.getDeclaredMethod("onWindowFocusChanged", boolean.class);
-                    default -> Activity.class.getDeclaredMethod(mname);
-                };
+                Method m;
+                switch (mname) {
+                    case "onCreate" -> m = Activity.class.getDeclaredMethod("onCreate", Bundle.class);
+                    case "onPostCreate" -> m = Activity.class.getDeclaredMethod("onPostCreate", Bundle.class);
+                    case "onWindowFocusChanged" -> m = Activity.class.getDeclaredMethod("onWindowFocusChanged", boolean.class);
+                    default -> m = Activity.class.getDeclaredMethod(mname);
+                }
 
                 hook(m).intercept(chain -> {
                     Activity act = (Activity) chain.getThisObject();
@@ -91,12 +96,18 @@ public class LockscreenCamera extends XposedModule {
 
         // 5. MIUI固有キーガードチェック無効化（保険）
         for (String methodName : new String[]{"checkKeyguard", "checkKeyguardFlag"}) {
-            try {
-                hook(Activity.class.getDeclaredMethod(methodName)).intercept(chain -> {
-                    if (chain.getMethod().getReturnType() == boolean.class) return false;
+            try {                // FIX: chain.getMethod() は存在しないため、事前にメソッドオブジェクトから型を判定
+                Method m = Activity.class.getDeclaredMethod(methodName);
+                boolean isBool = m.getReturnType() == boolean.class;
+                
+                hook(m).intercept(chain -> {
+                    log(Log.WARN, TAG, "Suppressed: " + methodName);
+                    // 戻り値が boolean なら false を、void なら null を返す
+                    if (isBool) return false;
                     return null;
                 });
-            } catch (Throwable ignored) {}        }
+            } catch (Throwable ignored) {}
+        }
     }
 
     @Override
@@ -128,14 +139,13 @@ public class LockscreenCamera extends XposedModule {
                             | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
                     
                     context.startActivity(intent);
-                    return null;
+                    return null; // 元のシステム処理をキャンセル
                 } catch (Throwable t) {
                     log(Log.ERROR, TAG, "Failed to launch secure camera", t);
                 }
                 return chain.proceed();
             });
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "GestureLauncherService hook skipped", t);
+        } catch (Throwable t) {            log(Log.WARN, TAG, "GestureLauncherService hook skipped", t);
         }
     }
 
@@ -145,7 +155,8 @@ public class LockscreenCamera extends XposedModule {
      */
     private void applyDeepPatches(Activity activity) {
         try {
-            activity.setShowWhenLocked(true);            activity.setTurnScreenOn(true);
+            activity.setShowWhenLocked(true);
+            activity.setTurnScreenOn(true);
             
             Window win = activity.getWindow();
             if (win != null) {
