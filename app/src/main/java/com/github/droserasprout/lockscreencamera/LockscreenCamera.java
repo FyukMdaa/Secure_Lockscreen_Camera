@@ -20,18 +20,19 @@ import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
 import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
+import io.github.libxposed.api.InvocationChain; // ラムダ式のために追加
 
 public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
 
-    // 【認証競合回避】判定に直結するフィールドのみを狙い撃ち（全スキャン廃止）
+    // 認証競合回避のために狙い撃ちするフィールド
     private static final String[] TARGET_BOOLEAN_FIELDS = {
         "mIsSecure", "mIsSecureCamera", "mKeyguardLocked",
         "mInLockScreen", "mIgnoreKeyguard", "mIsScreenOn",
         "mSecureCamera", "mIsKeyguardLocked", "mIsHideForeground", 
         "mIsGalleryLock", "mIsCaptureIntent", "mIsPortraitIntent", "mIsVideoIntent",
-        "mUserAuthenticationFlag", "mIgnoreKeyguardCheck" // 認証競合回避用
+        "mUserAuthenticationFlag", "mIgnoreKeyguardCheck"
     };
 
     public LockscreenCamera() {
@@ -46,12 +47,19 @@ public class LockscreenCamera extends XposedModule {
 
         log(Log.INFO, TAG, "Targeting com.android.camera (Biometric Bypass / Phase3)");
 
-        // 1. 【核心】BiometricManager 偽装（認証リソース競合の回避）
-        // システムに「認証プロセスは完了／競合なし」と誤認させ、CameraService の切断を防ぐ        try {
+        // 1. 【核心】BiometricManager 偽装（認証リソース競合の回避）        try {
+            // Class.forName は ClassNotFoundException を投げる可能性があるため try-catch 必須
             Class<?> biometricClass = Class.forName("android.hardware.biometrics.BiometricManager");
             Method canAuth = biometricClass.getDeclaredMethod("canAuthenticate", int.class);
-            hook(canAuth).intercept(chain -> 0); // BIOMETRIC_SUCCESS を返す
-        } catch (Throwable ignored) {}
+            hook(canAuth).intercept(new io.github.libxposed.api.Interceptor() {
+                @Override
+                public Object intercept(InvocationChain chain) throws Throwable {
+                    return 0; // BIOMETRIC_SUCCESS を返す
+                }
+            });
+        } catch (Throwable ignored) {
+            // メソッドが存在しない場合などは無視
+        }
 
         // 2. KeyguardManager 偽装（システム判定回避）
         try {
@@ -63,7 +71,7 @@ public class LockscreenCamera extends XposedModule {
         // 3. Intent 保護（セキュアアクション維持）
         try {
             hook(Activity.class.getDeclaredMethod("setIntent", Intent.class)).intercept(chain -> {
-                Intent intent = (Intent) ((List<?>) chain.getArgs()).get(0);
+                Intent intent = (Intent) chain.getArgs().get(0);
                 if (intent != null) {
                     intent.setAction(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
                 }
@@ -83,10 +91,12 @@ public class LockscreenCamera extends XposedModule {
         String[] bufferCriticalMethods = {"onStart", "onResume", "onWindowFocusChanged"};
         for (String mname : bufferCriticalMethods) {
             try {
-                Method m = "onWindowFocusChanged".equals(mname)
-                        ? Activity.class.getDeclaredMethod("onWindowFocusChanged", boolean.class)
-                        : Activity.class.getDeclaredMethod(mname);
-
+                Method m;
+                if ("onWindowFocusChanged".equals(mname)) {
+                    m = Activity.class.getDeclaredMethod("onWindowFocusChanged", boolean.class);
+                } else {
+                    m = Activity.class.getDeclaredMethod(mname);
+                }
                 hook(m).intercept(chain -> {
                     Activity act = (Activity) chain.getThisObject();
                     
@@ -96,14 +106,17 @@ public class LockscreenCamera extends XposedModule {
                     }
 
                     if (act.getPackageName().equals("com.android.camera")) {
-                        // MIUI の初期化を先に通す                        Object res = chain.proceed();
+                        // MIUI の初期化を先に通す
+                        Object res = chain.proceed();
                         // ウィンドウ確定後にバッファ状態をリセット＆認証フラグ適用
                         applyWindowAndBufferFixes(act);
                         return res;
                     }
                     return chain.proceed();
                 });
-            } catch (Throwable ignored) {}
+            } catch (Throwable ignored) {
+                // メソッドが見つからない場合は無視
+            }
         }
     }
 
@@ -129,11 +142,10 @@ public class LockscreenCamera extends XposedModule {
                             | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
                     
                     context.startActivity(intent);
-                    return null;
+                    return null; // 元のシステム処理をキャンセル
                 } catch (Throwable t) {
                     log(Log.ERROR, TAG, "Failed to launch", t);
-                }
-                return chain.proceed();
+                }                return chain.proceed();
             });
         } catch (Throwable t) {
             log(Log.WARN, TAG, "System hook skipped", t);
@@ -142,19 +154,18 @@ public class LockscreenCamera extends XposedModule {
 
     /**
      * 描画パイプライン偽装：FLAG_SECURE クリア → フラグ再設定 → 認証フラグパッチ
-     * Biometric/Sensor 競合による HardwareBuffer 破棄を防ぐ
      */
     private void applyWindowAndBufferFixes(Activity activity) {
-        try {            // Android 15 要件：画面点灯状態とカメラ権限の明示的リンク
+        try {
             activity.setShowWhenLocked(true);
             activity.setTurnScreenOn(true);
 
             Window win = activity.getWindow();
             if (win != null) {
-                // 1. 厳格なセキュアチェックを一度解除（Buffer 破棄トリガーを無効化）
+                // 1. 厳格なセキュアチェックを一度解除
                 win.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
                 
-                // 2. ロック画面フラグを再適用（SurfaceFlinger に「安全な割り当て」と誤認させる）
+                // 2. ロック画面フラグを再適用
                 win.addFlags(
                     WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
                     WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
@@ -175,7 +186,7 @@ public class LockscreenCamera extends XposedModule {
     }
 
     /**
-     * 高速フィールド探索（全スキャン廃止。見つかり次第即終了）
+     * 高速フィールド探索
      */
     private void setFieldIfExists(Object obj, String fieldName, Object value) {
         try {
@@ -183,9 +194,8 @@ public class LockscreenCamera extends XposedModule {
             while (current != null && !current.getName().equals("android.app.Activity")) {
                 try {
                     Field f = current.getDeclaredField(fieldName);
-                    f.setAccessible(true);
-                    f.set(obj, value);
-                    return; // 成功即終了
+                    f.setAccessible(true);                    f.set(obj, value);
+                    return;
                 } catch (NoSuchFieldException e) {
                     current = current.getSuperclass();
                 }
