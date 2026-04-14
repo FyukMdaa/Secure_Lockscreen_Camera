@@ -39,66 +39,38 @@ public class LockscreenCamera extends XposedModule {
         if (!param.getPackageName().equals("com.android.camera")) {
             return;
         }
-
-        log(Log.INFO, TAG, "applying com.android.camera hooks");
-
+    
+        log(Log.INFO, TAG, "Applying generic hooks to com.android.camera");
+    
+        // 特定のクラス名に依存せず、ActivityクラスのonCreateをフックする
         try {
-            Class<?> cameraClass = Class.forName(
-                    "com.android.camera.Camera", true, param.getClassLoader());
-
-            Method onCreate = findMethod(cameraClass, "onCreate", Bundle.class);
-            hook(onCreate).intercept(chain -> {
-                log(Log.INFO, TAG, "hooking Camera activity onCreate");
+            hook(Activity.class.getDeclaredMethod("onCreate", Bundle.class)).intercept(chain -> {
                 Activity activity = (Activity) chain.getThisObject();
                 
-                // Android 8.1以降の推奨メソッドでロック画面上への表示を許可
-                activity.setShowWhenLocked(true);
-                activity.setTurnScreenOn(true);
-                
-                final Window win = activity.getWindow();
-                win.addFlags(
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
-                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
-                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                );
+                // 呼び出し元がcom.android.cameraパッケージのActivityである場合のみ処理
+                if (activity.getPackageName().equals("com.android.camera")) {
+                    log(Log.INFO, TAG, "Activity detected: " + activity.getClass().getName());
+    
+                    // 1. ロック画面上での表示を許可 (Android 8.0+)
+                    activity.setShowWhenLocked(true);
+                    activity.setTurnScreenOn(true);
+                    
+                    // 2. キーガードの解除（必要な場合）
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                        activity.getSystemService(android.app.KeyguardManager.class)
+                                .requestDismissKeyguard(activity, null);
+                    }
+    
+                    // 3. 従来のフラグも念のためセット
+                    Window win = activity.getWindow();
+                    win.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                            | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                            | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                }
                 return chain.proceed();
             });
-
-            for (String methodName : new String[]{"onStart", "onResume"}) {
-                try {
-                    Method m = findMethod(cameraClass, methodName);
-                    hook(m).intercept(chain -> {
-                        Activity activity = (Activity) chain.getThisObject();
-                        activity.setShowWhenLocked(true);
-                        activity.setTurnScreenOn(true);
-                        final Window win = activity.getWindow();
-                        win.addFlags(
-                            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
-                            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
-                            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-                        );
-                        return chain.proceed();
-                    });
-                } catch (Throwable t) {
-                    log(Log.WARN, TAG, "Could not hook " + methodName, t);
-                }
-            }
-
-            // セキュリティチェックをバイパス
-            for (String methodName : new String[]{"checkKeyguard", "checkKeyguardFlag"}) {
-                try {
-                    Method m = findMethod(cameraClass, methodName);
-                    hook(m).intercept(chain -> {
-                        log(Log.INFO, TAG, "suppressing " + methodName);
-                        return null;
-                    });
-                } catch (Throwable t) {
-                    // メソッドが存在しない場合は無視
-                }
-            }
-
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Error hooking com.android.camera", t);
+            log(Log.ERROR, TAG, "Failed to hook Activity.onCreate", t);
         }
     }
 
