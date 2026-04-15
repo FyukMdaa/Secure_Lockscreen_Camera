@@ -31,6 +31,7 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
+    // フィールド検索用キャッシュ
     private static final Map<String, Field> fieldCache = new ConcurrentHashMap<>();
 
     // 書き換え対象の内部フィールド名リスト
@@ -46,8 +47,8 @@ public class LockscreenCamera extends XposedModule {
     public LockscreenCamera() {
         super();
     }
-
-    @Override    public void onPackageReady(@NonNull PackageReadyParam param) {
+    @Override
+    public void onPackageReady(@NonNull PackageReadyParam param) {
         if (!param.getPackageName().equals("com.android.camera")) {
             return;
         }
@@ -65,7 +66,7 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // isResumed -> 常に true (Final メソッドの可能性あり)
+        // isResumed -> 常に true
         try {
             hook(Activity.class.getDeclaredMethod("isResumed")).intercept(chain -> {
                 if (isCameraActivity((Activity) chain.getThisObject())) return true;
@@ -95,8 +96,8 @@ public class LockscreenCamera extends XposedModule {
         // 3. 信頼性偽装 (Referrer & Keyguard)
         try {
             hook(Activity.class.getDeclaredMethod("getReferrer")).intercept(chain -> {
-                if (isCameraActivity((Activity) chain.getThisObject()))
-                    return Uri.parse("android-app://android"); // 呼び出し元をシステムに偽装                return chain.proceed();
+                if (isCameraActivity((Activity) chain.getThisObject()))                    return Uri.parse("android-app://android"); // 呼び出し元をシステムに偽装
+                return chain.proceed();
             });
         } catch (Throwable ignored) {}
 
@@ -122,7 +123,7 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 5. 【修正】SurfaceView/View 非表示化を阻止（NativeWindow 死亡防止）
+        // 5. SurfaceView/View 非表示化を阻止（NativeWindow 死亡防止）
         // View.setVisibility をフックし、Camera アプリのビューが隠されるのを VISIBLE に強制書き換え
         try {
             hook(View.class.getMethod("setVisibility", int.class)).intercept(chain -> {
@@ -144,8 +145,8 @@ public class LockscreenCamera extends XposedModule {
         String[] criticalMethods = {"attachBaseContext", "onCreate", "onStart", "onResume", "onWindowFocusChanged"};
         for (String mname : criticalMethods) {
             try {
-                Method m;
-                if ("attachBaseContext".equals(mname)) {                    m = ContextWrapper.class.getDeclaredMethod("attachBaseContext", Context.class);
+                Method m;                if ("attachBaseContext".equals(mname)) {
+                    m = ContextWrapper.class.getDeclaredMethod("attachBaseContext", Context.class);
                 } else if ("onCreate".equals(mname)) {
                     m = Activity.class.getDeclaredMethod("onCreate", Bundle.class);
                 } else if ("onWindowFocusChanged".equals(mname)) {
@@ -193,8 +194,8 @@ public class LockscreenCamera extends XposedModule {
         } catch (Throwable ignored) {}
         
         // setIntent フック
-        try {
-            hook(Activity.class.getDeclaredMethod("setIntent", Intent.class)).intercept(chain -> {                Intent intent = (Intent) ((List<?>) chain.getArgs()).get(0);
+        try {            hook(Activity.class.getDeclaredMethod("setIntent", Intent.class)).intercept(chain -> {
+                Intent intent = (Intent) ((List<?>) chain.getArgs()).get(0);
                 if (isCameraActivity((Activity) chain.getThisObject()) && intent != null) {
                     intent.setAction(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
                 }
@@ -242,8 +243,8 @@ public class LockscreenCamera extends XposedModule {
 
                     Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK 
-                            | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS | Intent.FLAG_ACTIVITY_NO_USER_ACTION
-                            | Intent.FLAG_ACTIVITY_NO_ANIMATION | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+                            | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS | Intent.FLAG_ACTIVITY_NO_USER_ACTION                            | Intent.FLAG_ACTIVITY_NO_ANIMATION | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+
                     intent.putExtra("android.intent.extra.CAMERA_OPEN_SOURCE", "lockscreen_gesture");
                     intent.putExtra("com.miui.camera.extra.START_BY_KEYGUARD", true);
                     intent.putExtra("ShowCameraWhenLocked", true);
@@ -291,8 +292,8 @@ public class LockscreenCamera extends XposedModule {
                 // 2. バッファ問題回避
                 window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
                 window.setFormat(PixelFormat.TRANSLUCENT);
-
-                // 3. キーガード解除要求                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // 3. キーガード解除要求
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     KeyguardManager km = (KeyguardManager) activity.getSystemService(Context.KEYGUARD_SERVICE);
                     if (km != null) km.requestDismissKeyguard(activity, null);
                 }
@@ -313,36 +314,38 @@ public class LockscreenCamera extends XposedModule {
             setFieldFast(activity, "mIsSecureCameraId", 0);
             
         } catch (Throwable t) {
-            log(Log.DEBUG, TAG, "Fixes failed", t);
+            // log メソッドの引数数に合わせるため、例外メッセージを文字列化
+            log(Log.DEBUG, TAG, "Fixes failed: " + t.toString());
         }
     }
 
     /**
-     * 高速フィールド探索（キャッシュ付き）
-     * 修正点: ラムダ式内の変数スコープを修正し、コンパイルエラーを解消
+     * 高速フィールド探索（キャッシュ付き・Lambda不使用版）
+     * コンパイル安定性のため、ラムダ式を使わず標準的なループ処理に変更
      */
     private void setFieldFast(Object obj, String fieldName, Object value) {
         try {
             Class<?> current = obj.getClass();
             String cacheKey = current.getName() + ":" + fieldName;
-            
-            // 【修正】ラムダ式内で使用する変数を適切に宣言
-            Field f = fieldCache.computeIfAbsent(cacheKey, k -> {
-                Class<?> clazz = current; // ローカル変数として定義
-                while (clazz != null && !clazz.getName().equals("android.app.Activity")) {
+            Field f = fieldCache.get(cacheKey);
+
+            // キャッシュにない場合のみ探索
+            if (f == null && !fieldCache.containsKey(cacheKey)) {
+                while (current != null && !current.getName().equals("android.app.Activity")) {
                     try {
-                        Field found = clazz.getDeclaredField(fieldName);
-                        found.setAccessible(true);
-                        return found;
+                        f = current.getDeclaredField(fieldName);
+                        f.setAccessible(true);
+                        break; // 見つかったら終了
                     } catch (NoSuchFieldException e) {
-                        clazz = clazz.getSuperclass();
+                        current = current.getSuperclass();
                     }
                 }
-                return null;
-            });
+                // 見つからなくても null をキャッシュして再探索を防ぐ
+                fieldCache.put(cacheKey, f);            }
 
-            if (f != null) {                f.set(obj, value);
+            if (f != null) {
+                f.set(obj, value);
             }
         } catch (Throwable ignored) {}
     }
-}
+} // クラスの閉じ括弧
