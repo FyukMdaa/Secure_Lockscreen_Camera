@@ -14,13 +14,12 @@ import androidx.annotation.NonNull;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.List;
+import java.util.List; // List インポートを追加
 
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
 import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
-import io.github.libxposed.api.InvocationChain; // ラムダ式のために追加
 
 public class LockscreenCamera extends XposedModule {
 
@@ -47,15 +46,11 @@ public class LockscreenCamera extends XposedModule {
 
         log(Log.INFO, TAG, "Targeting com.android.camera (Biometric Bypass / Phase3)");
 
-        // 1. 【核心】BiometricManager 偽装（認証リソース競合の回避）        try {
-            // Class.forName は ClassNotFoundException を投げる可能性があるため try-catch 必須
-            Class<?> biometricClass = Class.forName("android.hardware.biometrics.BiometricManager");
+        // 1. 【核心】BiometricManager 偽装（認証リソース競合の回避）
+        try {            Class<?> biometricClass = Class.forName("android.hardware.biometrics.BiometricManager");
             Method canAuth = biometricClass.getDeclaredMethod("canAuthenticate", int.class);
-            hook(canAuth).intercept(new io.github.libxposed.api.Interceptor() {
-                @Override
-                public Object intercept(InvocationChain chain) throws Throwable {
-                    return 0; // BIOMETRIC_SUCCESS を返す
-                }
+            hook(canAuth).intercept(chain -> {
+                return 0; // BIOMETRIC_SUCCESS を返す
             });
         } catch (Throwable ignored) {
             // メソッドが存在しない場合などは無視
@@ -71,7 +66,8 @@ public class LockscreenCamera extends XposedModule {
         // 3. Intent 保護（セキュアアクション維持）
         try {
             hook(Activity.class.getDeclaredMethod("setIntent", Intent.class)).intercept(chain -> {
-                Intent intent = (Intent) chain.getArgs().get(0);
+                // 修正: List<Object> のため .get(0) を使用
+                Intent intent = (Intent) ((List<?>) chain.getArgs()).get(0);
                 if (intent != null) {
                     intent.setAction(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
                 }
@@ -87,7 +83,7 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 5. 描画パイプライン確定タイミングでのみパッチ適用（onCreate は避ける）
+        // 5. 描画パイプライン確定タイミングでのみパッチ適用
         String[] bufferCriticalMethods = {"onStart", "onResume", "onWindowFocusChanged"};
         for (String mname : bufferCriticalMethods) {
             try {
@@ -97,10 +93,10 @@ public class LockscreenCamera extends XposedModule {
                 } else {
                     m = Activity.class.getDeclaredMethod(mname);
                 }
+
                 hook(m).intercept(chain -> {
                     Activity act = (Activity) chain.getThisObject();
-                    
-                    // OneTrack 関連は即スキップ（ANR/リーク防止）
+                                        // OneTrack 関連は即スキップ（ANR/リーク防止）
                     if (act.getClass().getName().contains("onetrack")) {
                         return chain.proceed();
                     }
@@ -118,7 +114,7 @@ public class LockscreenCamera extends XposedModule {
                 // メソッドが見つからない場合は無視
             }
         }
-    }
+    } // <--- 【重要】ここで onPackageReady メソッドを閉じる
 
     @Override
     public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
@@ -145,12 +141,12 @@ public class LockscreenCamera extends XposedModule {
                     return null; // 元のシステム処理をキャンセル
                 } catch (Throwable t) {
                     log(Log.ERROR, TAG, "Failed to launch", t);
-                }                return chain.proceed();
+                }
+                return chain.proceed();
             });
         } catch (Throwable t) {
-            log(Log.WARN, TAG, "System hook skipped", t);
-        }
-    }
+            log(Log.WARN, TAG, "System hook skipped", t);        }
+    } // <--- ここで onSystemServerStarting メソッドを閉じる
 
     /**
      * 描画パイプライン偽装：FLAG_SECURE クリア → フラグ再設定 → 認証フラグパッチ
@@ -194,11 +190,11 @@ public class LockscreenCamera extends XposedModule {
             while (current != null && !current.getName().equals("android.app.Activity")) {
                 try {
                     Field f = current.getDeclaredField(fieldName);
-                    f.setAccessible(true);                    f.set(obj, value);
+                    f.setAccessible(true);
+                    f.set(obj, value);
                     return;
                 } catch (NoSuchFieldException e) {
-                    current = current.getSuperclass();
-                }
+                    current = current.getSuperclass();                }
             }
         } catch (Throwable ignored) {}
     }
