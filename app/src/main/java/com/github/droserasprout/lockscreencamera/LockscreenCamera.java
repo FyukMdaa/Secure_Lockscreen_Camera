@@ -61,13 +61,11 @@ public class LockscreenCamera extends XposedModule {
                     "requestDismissKeyguard", Activity.class, KeyguardManager.KeyguardDismissCallback.class);
             hook(dismissMethod).intercept(chain -> {
                 log(Log.WARN, TAG, "BLOCKED: requestDismissKeyguard (Preventing PIN screen)");
-                // 何もせず null を返すことで、PIN 入力のトリガーを握りつぶす
                 return null;
             });
         } catch (Throwable ignored) {}
 
         // 2. Activity Visibility Spoofing (Surface 生存のための最重要ハック)
-        // MIUI カメラに「お前は最前面で見えている」と嘘をつくことで、リソース解放を防ぐ
         try {
             hook(Activity.class.getDeclaredMethod("hasWindowFocus")).intercept(chain -> {
                 if (isCameraActivity((Activity) chain.getThisObject())) return true;
@@ -96,9 +94,9 @@ public class LockscreenCamera extends XposedModule {
                 return chain.proceed();
             });
         } catch (Throwable ignored) {}
+
         // 4. 信頼性偽装 (Referrer)
-        try {
-            hook(Activity.class.getDeclaredMethod("getReferrer")).intercept(chain -> {
+        try {            hook(Activity.class.getDeclaredMethod("getReferrer")).intercept(chain -> {
                 if (isCameraActivity((Activity) chain.getThisObject()))
                     return Uri.parse("android-app://android");
                 return chain.proceed();
@@ -145,9 +143,9 @@ public class LockscreenCamera extends XposedModule {
                 if ("attachBaseContext".equals(mname)) {
                     m = ContextWrapper.class.getDeclaredMethod("attachBaseContext", Context.class);
                 } else if ("onCreate".equals(mname)) {
-                    m = Activity.class.getDeclaredMethod("onCreate", Bundle.class);                } else if ("onWindowFocusChanged".equals(mname)) {
-                    m = Activity.class.getDeclaredMethod("onWindowFocusChanged", boolean.class);
-                } else {
+                    m = Activity.class.getDeclaredMethod("onCreate", Bundle.class);
+                } else if ("onWindowFocusChanged".equals(mname)) {
+                    m = Activity.class.getDeclaredMethod("onWindowFocusChanged", boolean.class);                } else {
                     m = Activity.class.getDeclaredMethod(mname);
                 }
 
@@ -194,9 +192,9 @@ public class LockscreenCamera extends XposedModule {
             hook(Activity.class.getDeclaredMethod("setIntent", Intent.class)).intercept(chain -> {
                 Intent intent = (Intent) ((List<?>) chain.getArgs()).get(0);
                 if (isCameraActivity((Activity) chain.getThisObject()) && intent != null) {
-                    intent.setAction(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);                }
-                return chain.proceed();
-            });
+                    intent.setAction(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
+                }
+                return chain.proceed();            });
         } catch (Throwable ignored) {}
     } // onPackageReady end
 
@@ -239,9 +237,11 @@ public class LockscreenCamera extends XposedModule {
 
                     // 【重要】SECURE Intent を使用し、システムに PIN 不要であることを伝える
                     Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
-                    intent.setPackage("com.android.camera"); // パッケージ指定で起動を確実に
+                    intent.setPackage("com.android.camera");
+                    
+                    // 【修正】Intent.FLAG_ACTIVITY_SHOW_WHEN_LOCKED は削除（コンパイルエラー回避かつ冗長なため）
+                    // Activity.setShowWhenLocked(true) で十分に機能します
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK 
-                            | Intent.FLAG_ACTIVITY_SHOW_WHEN_LOCKED // ロック画面上に表示
                             | Intent.FLAG_ACTIVITY_CLEAR_TASK 
                             | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS                             | Intent.FLAG_ACTIVITY_NO_USER_ACTION);
 
@@ -288,16 +288,11 @@ public class LockscreenCamera extends XposedModule {
                 lp.flags &= ~WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD;
                 
                 window.setAttributes(lp);
-
-                // 3. キーガード解除要求の無効化（保険）
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    // KeyguardManager 自体のフックで止めるが、念のため
-                }                
+                
                 // 4. 親ウィンドウからの設定継承
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                     activity.setInheritShowWhenLocked(true);
-                }
-            }
+                }            }
 
             // 5. 内部フィールドパッチ
             for (String fieldName : TARGET_BOOLEAN_FIELDS) {
@@ -341,4 +336,5 @@ public class LockscreenCamera extends XposedModule {
                 f.set(obj, value);
             }
         } catch (Throwable ignored) {}
-    }}
+    }
+}
