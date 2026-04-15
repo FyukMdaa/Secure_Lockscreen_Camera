@@ -47,7 +47,11 @@ public class LockscreenCamera extends XposedModule {
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
         if (!param.getPackageName().equals("com.android.camera")) {
-            return;        }
+            return;
+        }
+
+        // 【修正】変数宣言をメソッドの最初に移動し、識別子を明確にする
+        String[] hookMethods = {"onCreate", "onStart", "onResume", "onWindowFocusChanged"};
 
         log(Log.INFO, TAG, "Targeting com.android.camera (Final Fix)");
 
@@ -95,13 +99,11 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 6. ライフサイクルフック（onCreate を復活＆先手必勝パッチ）
-        // エラーが出た変数 criticalMethods をここで再定義        String[] criticalMethods = {"onCreate", "onStart", "onResume", "onWindowFocusChanged"};
-
-        for (String mname : criticalMethods) {
+        // 6. ライフサイクルフック（hookMethods 配列を使用）
+        for (String mname : hookMethods) {
             try {
                 Method m;
-                // switch 式を if-else に変更して Java バージョン互換性を確保
+                // switch 式を使わず if-else で明示的に判定
                 if ("onCreate".equals(mname)) {
                     m = Activity.class.getDeclaredMethod("onCreate", Bundle.class);
                 } else if ("onWindowFocusChanged".equals(mname)) {
@@ -120,8 +122,7 @@ public class LockscreenCamera extends XposedModule {
                             if (!hasFocus) return chain.proceed(); 
                         }
 
-                        // 【重要】ここでフラグを適用してから proceed() を呼ぶ
-                        // これにより、カメラの初期化段階ですでにロック画面特権が与えられている状態になる
+                        // 先にフラグを適用してから proceed()
                         applyWindowAndBufferFixes(act);
                     }
                     return chain.proceed();
