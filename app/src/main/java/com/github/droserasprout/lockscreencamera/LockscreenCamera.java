@@ -20,8 +20,8 @@ import androidx.annotation.NonNull;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
@@ -326,9 +326,9 @@ public class LockscreenCamera extends XposedModule {
             Class<?> current = obj.getClass();
             String cacheKey = current.getName() + ":" + fieldName;
             
-            // 【修正】変数 'c' (clazz) をラムダ式内で宣言し、変更可能にする
+            // 【修正】ラムダ式内で使用する変数を適切に宣言
             Field f = fieldCache.computeIfAbsent(cacheKey, k -> {
-                Class<?> clazz = obj.getClass(); // ローカル変数として再定義
+                Class<?> clazz = current; // ローカル変数として定義
                 while (clazz != null && !clazz.getName().equals("android.app.Activity")) {
                     try {
                         Field found = clazz.getDeclaredField(fieldName);
@@ -341,6 +341,8 @@ public class LockscreenCamera extends XposedModule {
                 return null;
             });
 
-            if (f != null) f.set(obj, value);        } catch (Throwable ignored) {}
+            if (f != null) {                f.set(obj, value);
+            }
+        } catch (Throwable ignored) {}
     }
-                }
+}
