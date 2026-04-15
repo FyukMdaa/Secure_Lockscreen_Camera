@@ -1,8 +1,10 @@
 package com.github.droserasprout.lockscreencamera;
 
 import android.app.Activity;
+import android.app.KeyguardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.PixelFormat;
 import android.os.Bundle;
 import android.provider.MediaStore;
 import android.util.Log;
@@ -11,7 +13,11 @@ import android.view.WindowManager;
 
 import androidx.annotation.NonNull;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
 
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
@@ -21,17 +27,20 @@ public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
 
-    private static Method findMethod(Class<?> clazz, String name, Class<?>... params)
-            throws NoSuchMethodException {
-        Class<?> c = clazz;
-        while (c != null) {
-            try {
-                return c.getDeclaredMethod(name, params);
-            } catch (NoSuchMethodException e) {
-                c = c.getSuperclass();
-            }
-        }
-        throw new NoSuchMethodException(name);
+    // スレッドセーフなキャッシュ
+    private static final Map<String, Field> fieldCache = new ConcurrentHashMap<>();
+
+    private static final String[] TARGET_BOOLEAN_FIELDS = {
+        "mIsSecure", "mIsSecureCamera", "mKeyguardLocked",
+        "mInLockScreen", "mIgnoreKeyguard", "mIsScreenOn",
+        "mSecureCamera", "mIsKeyguardLocked", "mIsHideForeground", 
+        "mIsGalleryLock", "mIsCaptureIntent", "mIsPortraitIntent", "mIsVideoIntent",
+        "mUserAuthenticationFlag", "mIgnoreKeyguardCheck",
+        "mIsCameraApp", "mPrivacyAuthorized", "mIsForeground"
+    };
+
+    public LockscreenCamera() {
+        super();
     }
 
     @Override
@@ -39,102 +48,173 @@ public class LockscreenCamera extends XposedModule {
         if (!param.getPackageName().equals("com.android.camera")) {
             return;
         }
+        log(Log.INFO, TAG, "Targeting com.android.camera (Final: NPE & Foreground Fix)");
 
-        log(Log.INFO, TAG, "applying com.android.camera hooks");
-
+        // 1. onCameraUnavailable ブロック（サブカメラ不在エラーの握りつぶし）
         try {
-            Class<?> cameraClass = Class.forName(
-                    "com.android.camera.Camera", true, param.getClassLoader());
+            Class<?> callbackClass = Class.forName("android.hardware.camera2.CameraManager$AvailabilityCallback", true, param.getClassLoader());
+            Method onUnavailable = callbackClass.getDeclaredMethod("onCameraUnavailable", String.class);
+            hook(onUnavailable).intercept(chain -> {
+                String cameraId = (String) ((List<?>) chain.getArgs()).get(0);
+                log(Log.INFO, TAG, "Blocked onCameraUnavailable for ID: " + cameraId);
+                return null;
+            });
+        } catch (Throwable ignored) {}
 
-            // onCreate: ロック画面フラグ設定
-            Method onCreate = findMethod(cameraClass, "onCreate", Bundle.class);
-            hook(onCreate).intercept(chain -> {
-                log(Log.INFO, TAG, "onCreate hooked");
-                Activity activity = (Activity) chain.getThisObject();
-                activity.setShowWhenLocked(true);
-                activity.setTurnScreenOn(true);
-                final Window win = activity.getWindow();
-                win.addFlags(
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
-                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
-                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                );
+        // 2. BiometricManager 偽装
+        try {
+            Class<?> biometricClass = Class.forName("android.hardware.biometrics.BiometricManager", true, param.getClassLoader());
+            Method canAuth = biometricClass.getDeclaredMethod("canAuthenticate", int.class);
+            hook(canAuth).intercept(chain -> 0);
+        } catch (Throwable ignored) {}
+
+        // 3. KeyguardManager 偽装
+        try {
+            Class<?> kmClass = KeyguardManager.class;
+            hook(kmClass.getDeclaredMethod("isKeyguardLocked")).intercept(chain -> false);
+            hook(kmClass.getDeclaredMethod("isDeviceLocked")).intercept(chain -> false);
+        } catch (Throwable ignored) {}
+
+        // 4. Intent 保護
+        try {
+            hook(Activity.class.getDeclaredMethod("setIntent", Intent.class)).intercept(chain -> {
+                Intent intent = (Intent) ((List<?>) chain.getArgs()).get(0);
+                if (intent != null) {
+                    intent.setAction(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
+                }
                 return chain.proceed();
             });
+        } catch (Throwable ignored) {}
 
-            // onStart / onResume: フラグ再適用
-            for (String methodName : new String[]{"onStart", "onResume"}) {
-                try {
-                    Method m = findMethod(cameraClass, methodName);
-                    hook(m).intercept(chain -> {
-                        Activity activity = (Activity) chain.getThisObject();
-                        activity.setShowWhenLocked(true);
-                        activity.setTurnScreenOn(true);
-                        final Window win = activity.getWindow();
-                        win.addFlags(
-                            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
-                            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
-                            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-                        );
-                        return chain.proceed();
-                    });
-                } catch (Throwable t) {
-                    log(Log.WARN, TAG, "Could not hook " + methodName + ": " + t.getMessage());
-                }
-            }
+        // 5. finish() 監視＋ブロック（MIUIの強制終了を防ぐ）
+        try {
+            hook(Activity.class.getDeclaredMethod("finish")).intercept(chain -> {
+                log(Log.ERROR, TAG, "Finish Attempted by: " + Log.getStackTraceString(new Throwable()));
+                return null;
+            });
+        } catch (Throwable ignored) {}
 
-            // checkKeyguard / checkKeyguardFlag: MIUIがsetShowWhenLocked(false)するのを抑制
-            for (String methodName : new String[]{"checkKeyguard", "checkKeyguardFlag"}) {
-                try {
-                    Method m = findMethod(cameraClass, methodName);
-                    hook(m).intercept(chain -> {
-                        log(Log.INFO, TAG, "suppressing " + methodName);
-                        return null;
-                    });
-                } catch (Throwable t) {
-                    log(Log.WARN, TAG, "Could not hook " + methodName + ": " + t.getMessage());
-                }
-            }
+        // 6. ライフサイクルフック（onCreate を復活＆先手必勝パッチ）
+        // MIUIの初期化処理 (super.onCreate) が走る前にフラグを適用し、
+        // Android 15 のバックグラウンド制限 (CAMERA_DISABLED) を回避する        String[] criticalMethods = {"onCreate", "onStart", "onResume", "onWindowFocusChanged"};
+        for (String mname : criticalMethods) {
+            try {
+                Method m = switch (mname) {
+                    case "onCreate" -> Activity.class.getDeclaredMethod("onCreate", Bundle.class);
+                    case "onWindowFocusChanged" -> Activity.class.getDeclaredMethod("onWindowFocusChanged", boolean.class);
+                    default -> Activity.class.getDeclaredMethod(mname);
+                };
 
-        } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Error in onPackageReady: " + t.getMessage(), t);
+                hook(m).intercept(chain -> {
+                    Activity act = (Activity) chain.getThisObject();
+                    if (act.getPackageName().equals("com.android.camera")) {
+                        
+                        // フォーカス喪失時のスキップ処理
+                        if ("onWindowFocusChanged".equals(mname)) {
+                            boolean hasFocus = (boolean) ((List<?>) chain.getArgs()).get(0);
+                            if (!hasFocus) return chain.proceed(); 
+                        }
+
+                        // 【重要】ここでフラグを適用してから proceed() を呼ぶ
+                        // これにより、カメラの初期化段階ですでにロック画面特権が与えられている状態になる
+                        applyWindowAndBufferFixes(act);
+                    }
+                    return chain.proceed();
+                });
+            } catch (Throwable ignored) {}
         }
     }
 
     @Override
     public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
-        log(Log.INFO, TAG, "onSystemServerStarting called");
-
         try {
-            Class<?> gestureClass = Class.forName(
-                    "com.android.server.GestureLauncherService", true, param.getClassLoader());
-            Method handleCameraGesture = gestureClass.getDeclaredMethod(
-                    "handleCameraGesture", boolean.class, int.class);
+            Class<?> gestureClass = Class.forName("com.android.server.GestureLauncherService", true, param.getClassLoader());
+            Method handleCameraGesture = gestureClass.getDeclaredMethod("handleCameraGesture", boolean.class, int.class);
 
             hook(handleCameraGesture).intercept(chain -> {
-                log(Log.INFO, TAG, "intercepting GestureLauncherService.handleCameraGesture");
                 try {
-                    Method getContextMethod = chain.getThisObject().getClass()
-                            .getMethod("getContext");
+                    Method getContextMethod = chain.getThisObject().getClass().getMethod("getContext");
                     Context context = (Context) getContextMethod.invoke(chain.getThisObject());
+
                     Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
-                    intent.setPackage("com.android.camera");
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK |
-                                    Intent.FLAG_ACTIVITY_CLEAR_TASK |
-                                    Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                    android.os.UserHandle current = (android.os.UserHandle)
-                            android.os.UserHandle.class.getField("CURRENT").get(null);
-                    Method startActivityAsUser = Context.class.getMethod(
-                            "startActivityAsUser", Intent.class, android.os.UserHandle.class);
-                    startActivityAsUser.invoke(context, intent, current);
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK 
+                            | Intent.FLAG_ACTIVITY_CLEAR_TASK 
+                            | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS 
+                            | Intent.FLAG_ACTIVITY_NO_USER_ACTION
+                            | Intent.FLAG_ACTIVITY_NO_ANIMATION 
+                            | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+                    
+                    context.startActivity(intent);
+                                        // 【修正】プリミティブ型 (boolean) の戻り値には null を返すと NPE になるため、
+                    // ジェスチャーを消費したことを示す true を返す
+                    return true;
                 } catch (Throwable t) {
-                    log(Log.ERROR, TAG, "Error launching camera: " + t.getMessage(), t);
+                    log(Log.ERROR, TAG, "Failed to launch", t);
                 }
-                return Boolean.FALSE;
+                // エラー時は元の処理に任せる
+                return chain.proceed();
+            });
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "System hook skipped", t);
+        }
+    }
+
+    private void applyWindowAndBufferFixes(Activity activity) {
+        try {
+            activity.setShowWhenLocked(true);
+            activity.setTurnScreenOn(true);
+            activity.setInheritShowWhenLocked(true);
+
+            Window win = activity.getWindow();
+            if (win != null) {
+                win.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+                win.setFormat(PixelFormat.TRANSLUCENT);
+                win.addFlags(
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD |
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+                );
+            }
+
+            for (String fieldName : TARGET_BOOLEAN_FIELDS) {
+                setFieldFast(activity, fieldName, true);
+            }
+            setFieldFast(activity, "mIsNormalIntent", false);
+            setFieldFast(activity, "mShowEnteringAnimation", false);
+            setFieldFast(activity, "mKeyguardStatus", 1);
+            setFieldFast(activity, "mIsSecureCameraId", 0);
+            
+        } catch (Throwable t) {
+            log(Log.DEBUG, TAG, "Stage 4 fixes failed", t);
+        }
+    }
+
+    /**
+     * 高速フィールド探索（スレッドセーフキャッシュ付き）
+     */
+    private void setFieldFast(Object obj, String fieldName, Object value) {        try {
+            Class<?> current = obj.getClass();
+            String cacheKey = current.getName() + ":" + fieldName;
+            
+            Field f = fieldCache.computeIfAbsent(cacheKey, k -> {
+                Class<?> c = current;
+                while (c != null && !c.getName().equals("android.app.Activity")) {
+                    try {
+                        Field found = c.getDeclaredField(fieldName);
+                        found.setAccessible(true);
+                        return found;
+                    } catch (NoSuchFieldException e) {
+                        c = c.getSuperclass();
+                    }
+                }
+                return null;
             });
 
-        } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Error hooking GestureLauncherService: " + t.getMessage(), t);
-        }
+            if (f != null) {
+                f.set(obj, value);
+            }
+        } catch (Throwable ignored) {}
     }
 }
