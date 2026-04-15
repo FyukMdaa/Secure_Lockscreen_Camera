@@ -20,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
 
 import io.github.libxposed.api.XposedModule;
+import io.github.libxposed.api.XposedModuleInterface;
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
 import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 
@@ -46,11 +47,11 @@ public class LockscreenCamera extends XposedModule {
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
         if (!param.getPackageName().equals("com.android.camera")) {
-            return;
-        }
-        log(Log.INFO, TAG, "Targeting com.android.camera (Final: NPE & Foreground Fix)");
+            return;        }
 
-        // 1. onCameraUnavailable ブロック（サブカメラ不在エラーの握りつぶし）
+        log(Log.INFO, TAG, "Targeting com.android.camera (Final Fix)");
+
+        // 1. onCameraUnavailable ブロック
         try {
             Class<?> callbackClass = Class.forName("android.hardware.camera2.CameraManager$AvailabilityCallback", true, param.getClassLoader());
             Method onUnavailable = callbackClass.getDeclaredMethod("onCameraUnavailable", String.class);
@@ -86,7 +87,7 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 5. finish() 監視＋ブロック（MIUIの強制終了を防ぐ）
+        // 5. finish() 監視＋ブロック
         try {
             hook(Activity.class.getDeclaredMethod("finish")).intercept(chain -> {
                 log(Log.ERROR, TAG, "Finish Attempted by: " + Log.getStackTraceString(new Throwable()));
@@ -95,15 +96,19 @@ public class LockscreenCamera extends XposedModule {
         } catch (Throwable ignored) {}
 
         // 6. ライフサイクルフック（onCreate を復活＆先手必勝パッチ）
-        // MIUIの初期化処理 (super.onCreate) が走る前にフラグを適用し、
-        // Android 15 のバックグラウンド制限 (CAMERA_DISABLED) を回避する        String[] criticalMethods = {"onCreate", "onStart", "onResume", "onWindowFocusChanged"};
+        // エラーが出た変数 criticalMethods をここで再定義        String[] criticalMethods = {"onCreate", "onStart", "onResume", "onWindowFocusChanged"};
+
         for (String mname : criticalMethods) {
             try {
-                Method m = switch (mname) {
-                    case "onCreate" -> Activity.class.getDeclaredMethod("onCreate", Bundle.class);
-                    case "onWindowFocusChanged" -> Activity.class.getDeclaredMethod("onWindowFocusChanged", boolean.class);
-                    default -> Activity.class.getDeclaredMethod(mname);
-                };
+                Method m;
+                // switch 式を if-else に変更して Java バージョン互換性を確保
+                if ("onCreate".equals(mname)) {
+                    m = Activity.class.getDeclaredMethod("onCreate", Bundle.class);
+                } else if ("onWindowFocusChanged".equals(mname)) {
+                    m = Activity.class.getDeclaredMethod("onWindowFocusChanged", boolean.class);
+                } else {
+                    m = Activity.class.getDeclaredMethod(mname);
+                }
 
                 hook(m).intercept(chain -> {
                     Activity act = (Activity) chain.getThisObject();
@@ -140,12 +145,12 @@ public class LockscreenCamera extends XposedModule {
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK 
                             | Intent.FLAG_ACTIVITY_CLEAR_TASK 
                             | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS 
-                            | Intent.FLAG_ACTIVITY_NO_USER_ACTION
-                            | Intent.FLAG_ACTIVITY_NO_ANIMATION 
+                            | Intent.FLAG_ACTIVITY_NO_USER_ACTION                            | Intent.FLAG_ACTIVITY_NO_ANIMATION 
                             | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
                     
                     context.startActivity(intent);
-                                        // 【修正】プリミティブ型 (boolean) の戻り値には null を返すと NPE になるため、
+                    
+                    // 【修正】プリミティブ型 (boolean) の戻り値には null を返すと NPE になるため、
                     // ジェスチャーを消費したことを示す true を返す
                     return true;
                 } catch (Throwable t) {
@@ -190,11 +195,11 @@ public class LockscreenCamera extends XposedModule {
             log(Log.DEBUG, TAG, "Stage 4 fixes failed", t);
         }
     }
-
     /**
      * 高速フィールド探索（スレッドセーフキャッシュ付き）
      */
-    private void setFieldFast(Object obj, String fieldName, Object value) {        try {
+    private void setFieldFast(Object obj, String fieldName, Object value) {
+        try {
             Class<?> current = obj.getClass();
             String cacheKey = current.getName() + ":" + fieldName;
             
