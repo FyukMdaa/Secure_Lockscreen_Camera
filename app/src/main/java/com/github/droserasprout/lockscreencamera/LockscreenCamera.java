@@ -29,10 +29,8 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
-    // フィールドキャッシュ
     private static final Map<String, Field> fieldCache = new ConcurrentHashMap<>();
 
-    // 内部判定用フィールド
     private static final String[] TARGET_BOOLEAN_FIELDS = {
         "mIsSecure", "mIsSecureCamera", "mKeyguardLocked",
         "mInLockScreen", "mIgnoreKeyguard", "mIsScreenOn",
@@ -47,85 +45,73 @@ public class LockscreenCamera extends XposedModule {
     }
 
     @Override
-    public void onPackageReady(@NonNull PackageReadyParam param) {        // ターゲットパッケージの確認
+    public void onPackageReady(@NonNull PackageReadyParam param) {
         if (!param.getPackageName().equals("com.android.camera")) {
-            return;
-        }
+            return;        }
 
         log(Log.INFO, TAG, "Targeting com.android.camera (LaunchGuard Bypass)");
 
-        // 1. 【NEW】MIUI LaunchGuard の直接無効化
-        // LaunchGuard クラス（または類似の判定クラス）の boolean メソッドを全て true に書き換える
+        // 1. MIUI LaunchGuard の直接無効化
         try {
-            // MIUIのバージョンによってクラス名が異なる可能性があるため、主要候補を試す
             String[] candidateClasses = {
                 "com.android.camera.LaunchGuard",
                 "com.android.camera.guard.LaunchGuard",
-                "com.android.camera.module.loader.FunctionCameraPrepare" // 旧MIUI等の候補
+                "com.android.camera.module.loader.FunctionCameraPrepare"
             };
-
             Class<?> launchGuardClass = null;
             for (String className : candidateClasses) {
                 try {
                     launchGuardClass = Class.forName(className, true, param.getClassLoader());
                     break;
                 } catch (ClassNotFoundException e) {
-                    // 見つからなければ次の候補へ
+                    // 見つからなければ次へ
                 }
             }
 
             if (launchGuardClass != null) {
                 log(Log.INFO, TAG, "Found LaunchGuard class: " + launchGuardClass.getName());
                 for (Method method : launchGuardClass.getDeclaredMethods()) {
-                    // boolean を返すメソッドをフックし、常に true を返す
                     if (method.getReturnType() == boolean.class) {
-                        hook(method).intercept(chain -> {
-                            log(Log.DEBUG, TAG, "Bypassing LaunchGuard: " + method.getName());
-                            return true;
-                        });
+                        hook(method).intercept(chain -> true);
                     }
                 }
-            } else {
-                log(Log.WARN, TAG, "LaunchGuard class not found in known candidates.");
             }
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Failed to hook LaunchGuard", t);
+            log(Log.WARN, TAG, "LaunchGuard hook failed", t);
         }
 
-        // 2. 【強化】finish() 呼び出しのブロック（拒否後の自爆防止）
+        // 2. finish() 呼び出しのブロック（拒否後の自爆防止）
         try {
-            hook(Activity.class.getDeclaredMethod("finish")).intercept(chain -> {
+            Method finishMethod = Activity.class.getDeclaredMethod("finish");
+            hook(finishMethod).intercept(chain -> {
                 Activity act = (Activity) chain.getThisObject();
-                // カメラアプリの finish 以外は通常通り通す                try {
-                    if (!"com.android.camera".equals(act.getPackageName())) return chain.proceed();
-                } catch (Exception e) {
-                     // パッケージ名取得失敗時は安全のため通す（あるいはブロックするかは判断によるが、ここでは通す）
-                     // ただし、CameraActivity の場合はクラス名で判定可能
-                     if (!act.getClass().getName().startsWith("com.android.camera")) return chain.proceed();
-                }
-                
-                log(Log.WARN, TAG, "BLOCKED: finish() call intercepted.");
-                // 実行をキャンセル
-                return null;
-            });
-            // finishAfterTransition もブロック（念のため）
-            try {
-                hook(Activity.class.getDeclaredMethod("finishAfterTransition")).intercept(chain -> {
-                    Activity act = (Activity) chain.getThisObject();
-                    try { if (!"com.android.camera".equals(act.getPackageName())) return chain.proceed(); } catch (Exception e) {}
-                    log(Log.WARN, TAG, "BLOCKED: finishAfterTransition() call intercepted.");
+                boolean isTarget = isCameraActivity(act);
+                if (isTarget) {
+                    log(Log.WARN, TAG, "BLOCKED: finish() intercepted.");
                     return null;
-                });
-            } catch (Exception ignored) {}
+                }
+                return chain.proceed();
+            });
+        } catch (Throwable ignored) {}
+
+        // 2b. finishAfterTransition() のブロック
+        try {
+            Method finishAfterMethod = Activity.class.getDeclaredMethod("finishAfterTransition");            hook(finishAfterMethod).intercept(chain -> {
+                Activity act = (Activity) chain.getThisObject();
+                boolean isTarget = isCameraActivity(act);
+                if (isTarget) {
+                    log(Log.WARN, TAG, "BLOCKED: finishAfterTransition() intercepted.");
+                    return null;
+                }
+                return chain.proceed();
+            });
         } catch (Throwable ignored) {}
 
         // 3. ライフサイクルフック（attachBaseContext を追加して早期パッチ適用）
         String[] criticalMethods = {"attachBaseContext", "onCreate", "onStart", "onResume", "onWindowFocusChanged"};
-
         for (String mname : criticalMethods) {
             try {
                 Method m;
-                // attachBaseContext は ContextWrapper で定義
                 if ("attachBaseContext".equals(mname)) {
                     m = ContextWrapper.class.getDeclaredMethod("attachBaseContext", Context.class);
                 } else if ("onCreate".equals(mname)) {
@@ -140,13 +126,7 @@ public class LockscreenCamera extends XposedModule {
                     Object thisObj = chain.getThisObject();
                     if (thisObj instanceof Activity) {
                         Activity act = (Activity) thisObj;
-                        
-                        // パッケージ判定（初期化段階での null 対策）
-                        boolean isTarget = false;
-                        try {
-                            isTarget = "com.android.camera".equals(act.getPackageName());
-                        } catch (Exception e) {                            isTarget = act.getClass().getName().startsWith("com.android.camera");
-                        }
+                        boolean isTarget = isCameraActivity(act);
 
                         if (isTarget) {
                             // フォーカス喪失時はスキップ
@@ -163,10 +143,9 @@ public class LockscreenCamera extends XposedModule {
             } catch (Throwable ignored) {}
         }
 
-        // 4. 既存のシステムフック群（Biometric, Keyguard, etc）
-        
-        // CameraManager AvailabilityCallback ブロック
-        try {
+        // 4. 既存のシステムフック群
+
+        // CameraManager AvailabilityCallback ブロック        try {
             Class<?> callbackClass = Class.forName("android.hardware.camera2.CameraManager$AvailabilityCallback", true, param.getClassLoader());
             Method onUnavailable = callbackClass.getDeclaredMethod("onCameraUnavailable", String.class);
             hook(onUnavailable).intercept(chain -> {
@@ -188,14 +167,24 @@ public class LockscreenCamera extends XposedModule {
             hook(kmClass.getDeclaredMethod("isKeyguardLocked")).intercept(chain -> false);
             hook(kmClass.getDeclaredMethod("isDeviceLocked")).intercept(chain -> false);
         } catch (Throwable ignored) {}
-        
+
         // Intent 保護
         try {
             hook(Activity.class.getDeclaredMethod("setIntent", Intent.class)).intercept(chain -> {
                 Intent intent = (Intent) ((List<?>) chain.getArgs()).get(0);
                 if (intent != null) intent.setAction(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
-                return chain.proceed();            });
+                return chain.proceed();
+            });
         } catch (Throwable ignored) {}
+    }
+
+    // ヘルパーメソッド：パッケージ名の判定（例外処理を含む）
+    private boolean isCameraActivity(Activity act) {
+        try {
+            return "com.android.camera".equals(act.getPackageName());
+        } catch (Exception e) {
+            return act.getClass().getName().startsWith("com.android.camera");
+        }
     }
 
     @Override
@@ -205,8 +194,7 @@ public class LockscreenCamera extends XposedModule {
             Method handleCameraGesture = gestureClass.getDeclaredMethod("handleCameraGesture", boolean.class, int.class);
 
             hook(handleCameraGesture).intercept(chain -> {
-                try {
-                    Method getContextMethod = chain.getThisObject().getClass().getMethod("getContext");
+                try {                    Method getContextMethod = chain.getThisObject().getClass().getMethod("getContext");
                     Context context = (Context) getContextMethod.invoke(chain.getThisObject());
 
                     Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
@@ -217,15 +205,13 @@ public class LockscreenCamera extends XposedModule {
                             | Intent.FLAG_ACTIVITY_NO_ANIMATION 
                             | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
 
-                    // LaunchGuard 突破のための Extra 注入（維持）
                     intent.putExtra("android.intent.extra.CAMERA_OPEN_SOURCE", "lockscreen_gesture");
                     intent.putExtra("com.miui.camera.extra.START_BY_KEYGUARD", true);
                     intent.putExtra("ShowCameraWhenLocked", true);
                     intent.putExtra("StartFromKeyguard", true);
                     
                     context.startActivity(intent);
-                    // NPE 回避のため true を返す
-                    return true;
+                    return true; // boolean 戻り値
                 } catch (Throwable t) {
                     log(Log.ERROR, TAG, "Failed to launch", t);
                 }
@@ -238,12 +224,11 @@ public class LockscreenCamera extends XposedModule {
 
     private void applyWindowAndBufferFixes(Activity activity) {
         try {
-            // 1. ロック画面表示設定
             activity.setShowWhenLocked(true);
             activity.setTurnScreenOn(true);
 
-            // 2. Intent への Extra 再注入（LaunchGuard チェック用）
-            Intent intent = activity.getIntent();            if (intent != null) {
+            Intent intent = activity.getIntent();
+            if (intent != null) {
                 intent.putExtra("com.miui.camera.extra.START_BY_KEYGUARD", true);
                 intent.putExtra("ShowCameraWhenLocked", true);
                 intent.putExtra("android.intent.extra.CAMERA_OPEN_SOURCE", "lockscreen_gesture");
@@ -252,7 +237,6 @@ public class LockscreenCamera extends XposedModule {
 
             Window window = activity.getWindow();
             if (window != null) {
-                // 3. Window 属性の直接操作
                 WindowManager.LayoutParams lp = window.getAttributes();
                 lp.flags |= WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                           | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
@@ -260,12 +244,9 @@ public class LockscreenCamera extends XposedModule {
                           | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
                           | WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON;
                 window.setAttributes(lp);
-
-                // 4. バッファ問題回避
                 window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
                 window.setFormat(PixelFormat.TRANSLUCENT);
 
-                // 5. キーガード解除要求（システムへのシグナル）
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     KeyguardManager km = (KeyguardManager) activity.getSystemService(Context.KEYGUARD_SERVICE);
                     if (km != null) {
@@ -273,13 +254,11 @@ public class LockscreenCamera extends XposedModule {
                     }
                 }
 
-                // 6. 親ウィンドウからの設定継承
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                     activity.setInheritShowWhenLocked(true);
                 }
             }
 
-            // 7. 内部フィールドパッチ
             for (String fieldName : TARGET_BOOLEAN_FIELDS) {
                 setFieldFast(activity, fieldName, true);
             }
@@ -292,6 +271,7 @@ public class LockscreenCamera extends XposedModule {
             log(Log.DEBUG, TAG, "Fixes failed", t);
         }
     }
+
     private void setFieldFast(Object obj, String fieldName, Object value) {
         try {
             Class<?> current = obj.getClass();
@@ -312,8 +292,7 @@ public class LockscreenCamera extends XposedModule {
             });
 
             if (f != null) {
-                f.set(obj, value);
-            }
+                f.set(obj, value);            }
         } catch (Throwable ignored) {}
     }
 }
