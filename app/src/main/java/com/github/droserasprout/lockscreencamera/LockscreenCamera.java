@@ -58,7 +58,7 @@ public class LockscreenCamera extends XposedModule {
             return;
         }
 
-        log(Log.INFO, TAG, "Targeting com.android.camera (Secure Gallery Integration)");
+        log(Log.INFO, TAG, "Targeting com.android.camera (Secure Viewer Redirect)");
 
         // 0. DecorView の透明化・非表示化を物理的に阻止
         try {
@@ -135,30 +135,37 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 5. Secure Gallery Handshake (ギャラリー起動のセキュア化)
-        // カメラアプリがギャラリーを起動しようとした際、セキュアフラグを強制注入します
+        // 5. Secure Viewer Redirect (ギャラリー起動の横取りとリダイレクト)
+        // 外部ギャラリーへの遷移をカメラアプリ自身へリダイレクトし、外部アプリ依存を排除する
         try {
             hook(Activity.class.getDeclaredMethod("startActivity", Intent.class)).intercept(chain -> {
                 Activity caller = (Activity) chain.getThisObject();
-                // 呼び出し元がカメラアプリ かつ セキュアセッション中であるかチェック
-                if (isCameraActivity(caller) && isSecureSession(caller)) {
-                    Intent outIntent = (Intent) chain.getArgs().get(0);
-                    if (outIntent != null) {
-                        String action = outIntent.getAction();
-                        // ギャラリー関連のアクションか確認 (VIEW, PICK, GET_CONTENT)
-                        boolean isGalleryIntent = Intent.ACTION_VIEW.equals(action) || 
-                                                  Intent.ACTION_PICK.equals(action) ||
-                                                  "android.intent.action.GET_CONTENT".equals(action);
+                Intent outIntent = (Intent) chain.getArgs().get(0);
+
+                // セキュアセッション中 かつ 外部アプリへの遷移を試みている場合
+                if (isCameraActivity(caller) && isSecureSession(caller) && outIntent != null) {
+                    String action = outIntent.getAction();
+                    boolean isGalleryIntent = Intent.ACTION_VIEW.equals(action) || 
+                                              Intent.ACTION_PICK.equals(action) ||
+                                              "android.intent.action.GET_CONTENT".equals(action);
+                    
+                    // 外部パッケージが指定されている場合（＝外部アプリへ渡そうとしている）
+                    if (isGalleryIntent && outIntent.getPackage() != null && !outIntent.getPackage().equals("com.android.camera")) {
+                        log(Log.INFO, TAG, "Intercepting external gallery launch -> Redirecting to Camera App");
                         
-                        if (isGalleryIntent) {
-                            log(Log.INFO, TAG, "Intercepting Gallery Launch in Secure Mode -> Forcing Secure Flags");
-                            // MIUI ギャラリー等に「これはセキュアなリクエストだ」と伝える
-                            outIntent.putExtra("is_secure_camera", true);
-                            outIntent.putExtra("com.miui.gallery.extra.IS_SECURE_MODE", true);
-                            // ロック画面上でも表示できるようにする
-                            outIntent.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
-                            outIntent.addFlags(WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
-                        }
+                        // カメラアプリ自身（内蔵ビューアまたはメインActivity）へリダイレクト
+                        outIntent.setComponent(new ComponentName("com.android.camera", "com.android.camera.Camera"));
+                        outIntent.setPackage(null); // パッケージ指定をクリア
+                        
+                        // 既存タスクへの復帰、または新しいタスクとして開く
+                        outIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                        
+                        // ロック画面上での表示を強制
+                        outIntent.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
+                        outIntent.addFlags(WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
+                        
+                        // URIアクセス権の付与（写真データを見るために必要）
+                        outIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                     }
                 }
                 return chain.proceed();
