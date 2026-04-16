@@ -367,70 +367,59 @@ public class LockscreenCamera extends XposedModule {
     
         try {
             if (!isCameraPackage(ctx.getPackageName())) return;
-        } catch (Exception e) {
-            return;
-        }
+        } catch (Exception e) { return; }
     
         String action = intent.getAction();
+        // GCamのレビューアクションを確実に捉える
         boolean isGallery = Intent.ACTION_VIEW.equals(action) ||
                             Intent.ACTION_PICK.equals(action) ||
-                            action.contains("REVIEW");
+                            action.contains("REVIEW") ||
+                            action.contains("STILL_IMAGE_CAMERA");
     
-        if (isGallery && intent.getData() != null) {
-            Log.i(TAG, "Redirecting to SecureViewer (Session Photos)");
+        if (isGallery) {
+            Log.i(TAG, "Redirecting to SecureViewer: Force hijacking intent");
     
-            ArrayList<Uri> uriList = new ArrayList<>();
-            if (!SessionManager.SESSION_URIS.isEmpty()) {
-                uriList.addAll(SessionManager.SESSION_URIS);
-            }
+            ArrayList<Uri> uriList = new ArrayList<>(SessionManager.SESSION_URIS);
             if (uriList.isEmpty() && intent.getData() != null) {
                 uriList.add(intent.getData());
             }
     
-            // クリーンな新しいIntentを作成（元のIntentのフラグ汚染を防ぐ）
-            Intent secureIntent = new Intent();
-            secureIntent.setComponent(new ComponentName(
+            // 既存のインテントを完全に再利用・改変して、システムを騙す
+            intent.setComponent(new ComponentName(
                     "com.github.droserasprout.lockscreencamera",
                     "com.github.droserasprout.lockscreencamera.SecureViewerActivity"
             ));
+            
+            // Googleフォトがリストに並ぶのを防ぐ
+            intent.setPackage(null); 
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.ICE_CREAM_SANDWICH) {
+                intent.setSelector(null);
+            }
     
-            // ClipDataを使って複数URIの読み取り権限をシステムに認めさせる（超重要）
+            // 複数枚のプレビューに対応させるためのClipData
             if (!uriList.isEmpty()) {
-                ClipData clipData = new ClipData(
-                        "session_photos",
-                        new String[]{"image/*"},
-                        new ClipData.Item(uriList.get(0))
-                );
+                ClipData clipData = ClipData.newRawUri("Photos", uriList.get(0));
                 for (int i = 1; i < uriList.size(); i++) {
                     clipData.addItem(new ClipData.Item(uriList.get(i)));
                 }
-                secureIntent.setClipData(clipData);
-                secureIntent.setData(uriList.get(0)); // 互換性のため setData も設定
+                intent.setClipData(clipData);
             }
     
-            secureIntent.putParcelableArrayListExtra("session_photos_list", uriList);
-            Log.i(TAG, "Passed " + uriList.size() + " photos to viewer");
-    
-            // フラグの設定
-            // ※ WindowManagerの定数ではなく、正しいIntentフラグを使う
-            secureIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
-                                  Intent.FLAG_ACTIVITY_NEW_TASK |
-                                  Intent.FLAG_ACTIVITY_CLEAR_TOP |
-                                  Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+            intent.putParcelableArrayListExtra("session_photos_list", uriList);
             
-            // ロック画面上に表示したい場合の正しいフラグ
-            if (Build.VERSION.SDK_INT >= 27) {
-                secureIntent.addFlags(0x08000000); 
-            }
+            // ロック解除要求を回避するためのフラグ群
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                            Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | // 永続権限
+                            Intent.FLAG_ACTIVITY_NEW_TASK |
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP |
+                            Intent.FLAG_ACTIVITY_NO_ANIMATION);
     
-            // セキュアビューアの起動
-            ctx.startActivity(secureIntent);
+            // ロック画面上に表示するための隠しフラグ (SHOW_WHEN_LOCKED)
+            intent.addFlags(0x00080000 | 0x00400000 | 0x00200000); 
     
-            // 元のインテントを「安全に」無力化して二重表示を防ぐ
-            // （実在しないクラスを指定するとクラッシュするため、データを全て剥がす）
-            intent.setAction(null);
-            intent.setData(null);
-            intent.setClipData(null);
+            // ここで startActivity を呼ぶのではなく、この intent 自体を書き換えた状態で
+            // 元のメソッド（proceed）に戻すことで、カメラアプリに「自分の意志で」起動させる
+            Log.d(TAG, "Intent modification complete. Proceeding with hijacked intent.");
         }
     }
 
