@@ -58,7 +58,7 @@ public class LockscreenCamera extends XposedModule {
             return;
         }
 
-        log(Log.INFO, TAG, "Targeting com.android.camera (Secure Gallery Bypass)");
+        log(Log.INFO, TAG, "Targeting com.android.camera (Secure Gallery Bypass / Dual-Hook)");
 
         // 0. DecorView の透明化・非表示化を物理的に阻止
         try {
@@ -135,43 +135,56 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 5. Secure Gallery Bypass (内蔵ビューアへのリダイレクト)
-        // 外部ギャラリーへの遷移をブロックし、カメラアプリ自身へリダイレクトして「撮ったものだけ」を表示させる
+        // 5. Secure Gallery Bypass (リダイレクトの徹底 / Dual-Hook)
+        // startActivity と startActivityForResult の両方をカバーし、外部ギャラリーへの遷移を100%内部へリダイレクト
         try {
-            hook(Activity.class.getDeclaredMethod("startActivity", Intent.class)).intercept(chain -> {
+            io.github.libxposed.api.Interceptor galleryHook = chain -> {
                 Activity caller = (Activity) chain.getThisObject();
-                Intent outIntent = (Intent) chain.getArgs().get(0);
+                Intent outIntent = (Intent) chain.getArgs().get(0); // 最初の引数は必ずIntent
 
-                // セキュアセッション中 かつ ギャラリー関連のアクションか確認
                 if (isCameraActivity(caller) && isSecureSession(caller) && outIntent != null) {
                     String action = outIntent.getAction();
-                    boolean isGalleryIntent = Intent.ACTION_VIEW.equals(action) || 
+                    // ギャラリー/レビュー関連のアクションを捕捉
+                    boolean isGalleryIntent = Intent.ACTION_VIEW.equals(action) ||
                                               Intent.ACTION_PICK.equals(action) ||
-                                              "android.intent.action.GET_CONTENT".equals(action);
-                    
-                    // 外部パッケージが指定されている場合（＝外部アプリへ渡そうとしている）
-                    if (isGalleryIntent && outIntent.getPackage() != null && !outIntent.getPackage().equals("com.android.camera")) {
-                        log(Log.INFO, TAG, "Redirecting Gallery intent to Internal Camera Activity");
-                        
-                        // カメラアプリ自身（内蔵ビューアまたはメインActivity）へリダイレクト
+                                              "android.intent.action.GET_CONTENT".equals(action) ||
+                                              "com.android.camera.action.REVIEW".equals(action);
+
+                    if (isGalleryIntent) {
+                        log(Log.INFO, TAG, "Forcing redirection to Internal Camera Activity from: " + action);
+
+                        // 特定パッケージ（Googleフォト等）への固定を完全に解除
+                        outIntent.setPackage(null);
+                        // 自分自身（カメラアプリ）をターゲットに設定
                         outIntent.setComponent(new ComponentName("com.android.camera", "com.android.camera.Camera"));
-                        outIntent.setPackage(null); // パッケージ指定をクリア
-                        
+
                         // ロック画面上での表示を強制
                         outIntent.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
                         outIntent.addFlags(WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
-                        
                         // URIアクセス権の付与（写真データを見るために必要）
                         outIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                        
-                        // カメラ側に「これはプレビュー要求だ」と伝えるためのフラグ
+
+                        // プレビューモード用フラグ注入
                         outIntent.putExtra("from_gallery", true);
                         outIntent.putExtra("is_secure_camera", true);
+
+                        // データタイプの上書き（必要に応じて）
+                        if (outIntent.getData() != null) {
+                            outIntent.setDataAndType(outIntent.getData(), "image/*");
+                        }
                     }
                 }
                 return chain.proceed();
-            });
-        } catch (Throwable ignored) {}
+            };
+
+            // startActivity(Intent) をフック
+            hook(Activity.class.getDeclaredMethod("startActivity", Intent.class)).intercept(galleryHook);
+            // startActivityForResult(Intent, int) をフック
+            hook(Activity.class.getDeclaredMethod("startActivityForResult", Intent.class, int.class)).intercept(galleryHook);
+            
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "Failed to hook startActivity variations", t);
+        }
 
         // 6. ライフサイクルフック（+ 自動終了機能の実装）
         String[] criticalMethods = {"attachBaseContext", "onCreate", "onStart", "onResume", "onWindowFocusChanged"};
