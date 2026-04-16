@@ -73,7 +73,7 @@ public class LockscreenCamera extends XposedModule {
             Log.i(TAG, "Secure Camera Session Cleared");
         }
 
-        // 【修正】重複チェックとログ追加
+        // 重複チェックとログ追加
         public static void add(Uri uri) {
             if (isActive && uri != null) {
                 // 重複した URI は追加しない
@@ -313,7 +313,7 @@ public class LockscreenCamera extends XposedModule {
         } catch (Throwable ignored) {}
     }
 
-    // --- ヘルパーメソッド群 ---
+    // 9. ヘルパーメソッド群
 
     private boolean isCameraActivity(Activity act) {
         try { return act != null && "com.android.camera".equals(act.getPackageName()); }
@@ -331,18 +331,16 @@ public class LockscreenCamera extends XposedModule {
         return v.getClass().getName().endsWith("DecorView");
     }
 
-    /**
-     * ギャラリー起動インテントをモジュール内の SecureViewerActivity へ強制リダイレクト
-     */
+    // 10. ギャラリー起動インテントをモジュール内の SecureViewerActivity へ強制リダイレクト
     private void handleGalleryRedirect(Context ctx, Intent intent) {
         if (ctx == null || intent == null || intent.getAction() == null) return;
+
+        // ロック画面セッション中でなければ、一切リダイレクトしない
+        if (!SessionManager.isActive) return;
 
         try {
             if (!"com.android.camera".equals(ctx.getPackageName())) return;
         } catch (Exception e) { return; }
-
-        // ロック画面セッション中でなければ、一切リダイレクトしない（通常起動時の誤発動を防止）
-        if (!SessionManager.isActive) return;
 
         String action = intent.getAction();
         boolean isGallery = Intent.ACTION_VIEW.equals(action) ||
@@ -373,7 +371,23 @@ public class LockscreenCamera extends XposedModule {
                 intent.setSelector(null);
             }
 
-            // リストを Intent に詰め込み
+            // URI リストを ClipData に格納して、すべての URI に読み取り権限を付与する
+            if (!uriList.isEmpty()) {
+                // ClipData の作成（第 1 引数はラベル、第 2 引数は MIME タイプ、第 3 引数は初期アイテム）
+                ClipData clipData = new ClipData(
+                        "session_photos", 
+                        new String[]{"image/*"}, 
+                        new ClipData.Item(uriList.get(0))
+                );
+                // 残りの URI を追加
+                for (int i = 1; i < uriList.size(); i++) {
+                    clipData.addItem(new ClipData.Item(uriList.get(i)));
+                }
+                // Intent に ClipData を設定（これにより内部の全 URI に権限が付与される）
+                intent.setClipData(clipData);
+            }
+
+            // リストを Intent Extra にも残す（SecureViewerActivity が読み取る用）
             intent.putParcelableArrayListExtra("session_photos_list", uriList);
             Log.i(TAG, "Passed " + uriList.size() + " photos to viewer");
 
