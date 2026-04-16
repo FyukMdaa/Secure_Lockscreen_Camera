@@ -415,9 +415,9 @@ public class LockscreenCamera extends XposedModule {
                                   Intent.FLAG_ACTIVITY_CLEAR_TOP |
                                   Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
             
-            // ※ロック画面上に表示したい場合の正しいフラグ（API 27以上はActivity側でsetShowWhenLockedを使うのが推奨）
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                secureIntent.addFlags(Intent.FLAG_ACTIVITY_SHOW_WHEN_LOCKED);
+            // ロック画面上に表示したい場合の正しいフラグ
+            if (Build.VERSION.SDK_INT >= 27) {
+                secureIntent.addFlags(0x08000000); 
             }
     
             // セキュアビューアの起動
