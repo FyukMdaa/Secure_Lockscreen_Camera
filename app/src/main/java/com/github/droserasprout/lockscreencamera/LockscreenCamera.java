@@ -58,7 +58,7 @@ public class LockscreenCamera extends XposedModule {
             return;
         }
 
-        log(Log.INFO, TAG, "Targeting com.android.camera (Secure Gallery Bypass / Compilation Fix)");
+        log(Log.INFO, TAG, "Targeting com.android.camera (Ultimate Internal Redirect)");
 
         // 0. DecorView の透明化・非表示化を物理的に阻止
         try {
@@ -135,30 +135,28 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 5. Secure Gallery Bypass (リダイレクトの徹底)
-        // startActivity と startActivityForResult の両方をカバーし、外部ギャラリーへの遷移を内部へリダイレクト
+        // 5. 【究極版】Secure Gallery Redirect (Contextレベルフック & インテント完全洗浄)
         try {
-            // startActivity(Intent) をフック
-            hook(Activity.class.getDeclaredMethod("startActivity", Intent.class)).intercept(chain -> {
-                Activity caller = (Activity) chain.getThisObject();
-                Intent outIntent = (Intent) chain.getArgs().get(0);
-                handleGalleryRedirect(caller, outIntent);
+            Method startAct = Activity.class.getDeclaredMethod("startActivity", Intent.class);
+            hook(startAct).intercept(chain -> {
+                handleGalleryRedirect((Context) chain.getThisObject(), (Intent) chain.getArgs().get(0));
                 return chain.proceed();
             });
 
-            // startActivityForResult(Intent, int) をフック
-            try {
-                hook(Activity.class.getDeclaredMethod("startActivityForResult", Intent.class, int.class)).intercept(chain -> {
-                    Activity caller = (Activity) chain.getThisObject();
-                    Intent outIntent = (Intent) chain.getArgs().get(0);
-                    handleGalleryRedirect(caller, outIntent);
-                    return chain.proceed();
-                });
-            } catch (NoSuchMethodException ignored) {
-                // メソッドが存在しない場合は無視
-            }
+            Method startRes = Activity.class.getDeclaredMethod("startActivityForResult", Intent.class, int.class);
+            hook(startRes).intercept(chain -> {
+                handleGalleryRedirect((Context) chain.getThisObject(), (Intent) chain.getArgs().get(0));
+                return chain.proceed();
+            });
+            
+            // ContextWrapper (アプリ全体/低レイヤー) からの起動も捕捉
+            Method startCtx = ContextWrapper.class.getDeclaredMethod("startActivity", Intent.class);
+            hook(startCtx).intercept(chain -> {
+                handleGalleryRedirect((Context) chain.getThisObject(), (Intent) chain.getArgs().get(0));
+                return chain.proceed();
+            });
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Failed to hook startActivity variations", t);
+            log(Log.ERROR, TAG, "Failed to hook gallery redirect", t);
         }
 
         // 6. ライフサイクルフック（+ 自動終了機能の実装）
@@ -194,7 +192,6 @@ public class LockscreenCamera extends XposedModule {
                                 Object res = chain.proceed();
                                 
                                 Intent intent = act.getIntent();
-                                // 条件厳格化：アクションがセキュアインテント かつ ジェスチャー起動フラグがある場合のみ
                                 boolean isSecureAction = intent != null && MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE.equals(intent.getAction());
                                 boolean isLockscreenLaunch = intent != null && intent.getBooleanExtra("com.miui.camera.extra.START_BY_KEYGUARD", false);
 
@@ -210,7 +207,6 @@ public class LockscreenCamera extends XposedModule {
                                                 boolean shouldFinish = true;
                                                 
                                                 if (km != null) {
-                                                    // inKeyguardRestrictedInputMode: true = ロック中 / false = 解除済み
                                                     if (!km.inKeyguardRestrictedInputMode()) {
                                                         shouldFinish = false;
                                                         log(Log.DEBUG, TAG, "Device unlocked (Input allowed), keeping camera open.");
@@ -264,9 +260,8 @@ public class LockscreenCamera extends XposedModule {
         } catch (Throwable ignored) {}
     }
 
-    /**
-     * ヘルパーメソッド群
-     */
+    // --- ヘルパーメソッド群 ---
+
     private boolean isCameraActivity(Activity act) {
         try { return act != null && "com.android.camera".equals(act.getPackageName()); } 
         catch (Exception e) { try { return act.getClass().getName().startsWith("com.android.camera"); } catch (Exception e2) { return false; } }
@@ -293,36 +288,43 @@ public class LockscreenCamera extends XposedModule {
     }
 
     /**
-     * ギャラリー起動インテントを内部カメラアプリへリダイレクトする処理
+     * ギャラリー起動インテントを内部カメラアプリへ強制リダイレクトする処理
+     * (Activity 以外からの呼び出しも考慮)
      */
-    private void handleGalleryRedirect(Activity caller, Intent outIntent) {
-        if (isCameraActivity(caller) && isSecureSession(caller) && outIntent != null) {
-            String action = outIntent.getAction();
-            // ギャラリー/レビュー関連のアクションか確認
-            boolean isGalleryIntent = Intent.ACTION_VIEW.equals(action) ||
-                                      Intent.ACTION_PICK.equals(action) ||
-                                      "android.intent.action.GET_CONTENT".equals(action) ||
-                                      "com.android.camera.action.REVIEW".equals(action);
+    private void handleGalleryRedirect(Context ctx, Intent intent) {
+        if (ctx == null || intent == null || intent.getAction() == null) return;
+        
+        try {
+            // パッケージチェック
+            String pkg = ctx.getPackageName();
+            if (!"com.android.camera".equals(pkg)) return;
+        } catch (Exception e) { return; }
 
-            if (isGalleryIntent) {
-                log(Log.INFO, TAG, "Forcing redirection: " + outIntent.getPackage() + " -> Internal");
-
-                // 特定パッケージ（Googleフォト等）への固定を解除（権限エラー回避の最重要ポイント）
-                outIntent.setPackage(null);
-                // 自分自身（カメラアプリ）をターゲットに設定
-                outIntent.setComponent(new ComponentName("com.android.camera", "com.android.camera.Camera"));
-
-                // フラグの注入
-                outIntent.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
-                outIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                outIntent.putExtra("from_gallery", true);
-                outIntent.putExtra("is_secure_camera", true);
-
-                // Googleフォト等の特定のクラスを呼ぼうとするインテントデータを上書き
-                if (outIntent.getData() != null) {
-                    outIntent.setDataAndType(outIntent.getData(), "image/*");
-                }
+        String action = intent.getAction();
+        boolean isGallery = Intent.ACTION_VIEW.equals(action) ||
+                            Intent.ACTION_PICK.equals(action) ||
+                            "android.intent.action.GET_CONTENT".equals(action) ||
+                            action.contains("REVIEW");
+                            
+        if (isGallery) {
+            log(Log.INFO, TAG, "Forcing internal redirect from: " + intent.getPackage());
+            
+            // 1. 宛先の完全洗浄
+            intent.setComponent(new ComponentName("com.android.camera", "com.android.camera.Camera"));
+            intent.setPackage(null); // Googleフォト等のハードコードを解除
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.ICE_CREAM_SANDWICH) {
+                intent.setSelector(null); // セレクターによる絞り込みも解除
             }
+            
+            // 2. セキュアモードフラグ
+            intent.putExtra("is_secure_camera", true);
+            intent.putExtra("com.miui.camera.extra.IS_SECURE_CAMERA", true);
+            intent.putExtra("from_gallery", true);
+            
+            // 3. ロック画面表示 & 権限付与
+            intent.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                            Intent.FLAG_ACTIVITY_NEW_TASK |
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION);
         }
     }
 
@@ -337,11 +339,9 @@ public class LockscreenCamera extends XposedModule {
                     Method getContextMethod = chain.getThisObject().getClass().getMethod("getContext");
                     Context context = (Context) getContextMethod.invoke(chain.getThisObject());
                     
-                    // 現在のロック状態を判定してインテントを分岐
                     KeyguardManager km = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
                     boolean isLocked = (km != null && km.isKeyguardLocked());
 
-                    // ロック中なら SECURE、解除済みなら通常の STILL_IMAGE アクション
                     String action = isLocked ? MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE 
                                              : MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA;
                     
