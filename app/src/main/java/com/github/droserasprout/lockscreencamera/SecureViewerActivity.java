@@ -88,8 +88,6 @@ public class SecureViewerActivity extends Activity {
         // 最新画像 (リストの最後) に移動
         viewPager.setCurrentItem(uris.size() - 1, false);
 
-        Toast.makeText(this, "下にスワイプで終了 | ピンチでズーム", Toast.LENGTH_SHORT).show();
-
         // 4. 画面 OFF で自動終了
         screenOffReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) { finish(); }
