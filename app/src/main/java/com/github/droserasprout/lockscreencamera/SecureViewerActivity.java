@@ -45,23 +45,25 @@ public class SecureViewerActivity extends Activity {
         // スクリーンショット/録画を物理的に防止
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
 
-        // 2. スクロールビューの動的構築（XML不要）
+        // 2. スクロールビューの構築
+        // photoContainer の幅を WRAP_CONTENT にすることで、画像が増えると横に伸びてスクロール可能になる
         photoContainer = new LinearLayout(this);
         photoContainer.setOrientation(LinearLayout.HORIZONTAL);
-        photoContainer.setGravity(Gravity.CENTER);
-        photoContainer.setLayoutParams(new ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        photoContainer.setGravity(Gravity.CENTER_VERTICAL); // 縦方向は中央揃え
+        // 横幅は画像の分だけ伸びる (WRAP_CONTENT)
+        photoContainer.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, 
+                LinearLayout.LayoutParams.MATCH_PARENT));
 
         HorizontalScrollView scrollView = new HorizontalScrollView(this);
         scrollView.setLayoutParams(new ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        scrollView.setFillViewport(true);
+                ViewGroup.LayoutParams.MATCH_PARENT, 
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        scrollView.setFillViewport(true); // スクロールビューをビューポートで満たす
         scrollView.addView(photoContainer);
         setContentView(scrollView);
 
         // 3. データの受け取り（Intent から）
-        // ロック画面起動の場合は SessionManager.start() でリストがクリアされ、
-        // 撮影ごとに add() されている。HandleGalleryRedirect で Intent に詰め替えて渡されている。
         List<Uri> uris = getIntent().getParcelableArrayListExtra("session_photos_list");
 
         // フォールバック: リストが空でも、単一画像の Intent Data はあるか確認
@@ -82,7 +84,7 @@ public class SecureViewerActivity extends Activity {
             return;
         }
 
-        // 4. 画面OFFで自動終了＆セッションクリア
+        // 4. 画面OFFで自動終了
         screenOffReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) { finish(); }
         };
@@ -111,7 +113,8 @@ public class SecureViewerActivity extends Activity {
                 if (photoContainer.getChildCount() > 0) {
                     photoContainer.post(() -> {
                         View lastChild = photoContainer.getChildAt(photoContainer.getChildCount() - 1);
-                        lastChild.getParent().requestChildFocus(lastChild, lastChild);
+                        // 右端へスクロール
+                        ((HorizontalScrollView) lastChild.getParent()).fullScroll(View.FOCUS_RIGHT);
                     });
                 }
             });
@@ -120,19 +123,25 @@ public class SecureViewerActivity extends Activity {
 
     private void addPhotoView(Bitmap bitmap) {
         ImageView iv = new ImageView(this);
-        iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        iv.setPadding(16, 16, 16, 16);
+        iv.setScaleType(ImageView.ScaleType.FIT_CENTER); // 画像全体を表示
+        
+        // 画像間のスペース
+        int padding = 10; 
+        iv.setPadding(padding, padding, padding, padding);
+
+        // 幅：画面幅 (widthPixels)
+        // 高さ：画像のアスペクト比に合わせる (WRAP_CONTENT)
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                screenWidth, 
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        iv.setLayoutParams(params);
+        
         iv.setImageBitmap(bitmap);
-        iv.setBackgroundColor(0xFF111111);
+        iv.setBackgroundColor(0xFF000000); // 背景は黒
         
         // タップで終了
         iv.setOnClickListener(v -> finish());
-        
-        // 幅を画面に合わせて調整
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                (int)(getResources().getDisplayMetrics().widthPixels * 0.85),
-                ViewGroup.LayoutParams.MATCH_PARENT);
-        iv.setLayoutParams(params);
         
         photoContainer.addView(iv);
     }
