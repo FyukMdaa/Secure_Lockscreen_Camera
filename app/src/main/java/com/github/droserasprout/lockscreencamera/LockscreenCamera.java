@@ -52,6 +52,29 @@ public class LockscreenCamera extends XposedModule {
         super();
     }
 
+    // === クラス直下に追加 ===
+    public static class SessionManager {
+        public static volatile boolean isActive = false;
+        // スレッドセーフなリストでURIを保持
+        public static final java.util.List<android.net.Uri> SESSION_URIS = java.util.concurrent.CopyOnWriteArrayList();
+
+        public static void start() {
+            isActive = true;
+            SESSION_URIS.clear();
+            Log.i(TAG, "Secure Camera Session Started");
+        }
+        public static void end() {
+            isActive = false;
+            SESSION_URIS.clear();
+            Log.i(TAG, "Secure Camera Session Cleared");
+        }
+        public static void add(android.net.Uri uri) {
+            if (isActive && uri != null) {
+                SESSION_URIS.add(uri);
+            }
+        }
+    }
+
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
         if (!param.getPackageName().equals("com.android.camera")) {
@@ -202,6 +225,10 @@ public class LockscreenCamera extends XposedModule {
                                     BroadcastReceiver screenOffReceiver = new BroadcastReceiver() {
                                         @Override
                                         public void onReceive(Context context, Intent i) {
+                                        
+                                            SessionManager.end();
+                                            act.finish();
+                                            
                                             try {
                                                 KeyguardManager km = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
                                                 boolean shouldFinish = true;
@@ -245,7 +272,25 @@ public class LockscreenCamera extends XposedModule {
             } catch (Throwable ignored) {}
         }
 
-        // 7. その他システムフック群
+        // 7. プレビュー画像の絞り込み
+
+        try {
+            hook(android.content.ContentResolver.class.getDeclaredMethod("insert", android.net.Uri.class, android.content.ContentValues.class))
+                .intercept(chain -> {
+                    if (SessionManager.isActive) {
+                        android.net.Uri uri = (android.net.Uri) chain.getArgs().get(0);
+                        // 画像保存のみを対象にフィルタリング
+                        if (uri != null && uri.toString().contains("external/images")) {
+                            Uri returnedUri = (Uri) chain.proceed();
+                            SessionManager.add(returnedUri);
+                            return returnedUri;
+                        }
+                    }
+                    return chain.proceed();
+                });
+        } catch (Throwable ignored) {}
+
+        // 8. その他システムフック群
         try {
             Class<?> callbackClass = Class.forName("android.hardware.camera2.CameraManager$AvailabilityCallback", true, param.getClassLoader());
             hook(callbackClass.getDeclaredMethod("onCameraUnavailable", String.class)).intercept(chain -> {
@@ -366,6 +411,8 @@ public class LockscreenCamera extends XposedModule {
                     if (Build.VERSION.SDK_INT >= 34) {
                         options.setPendingIntentBackgroundActivityStartMode(2);
                     }
+
+                    SessionManager.start();
                     
                     context.startActivity(intent, options.toBundle());
                     return true;
