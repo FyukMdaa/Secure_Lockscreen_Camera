@@ -101,10 +101,7 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 3. 【削除】Finish Blocking Hook
-        // クラッシュが解消し、ユーザーが手動で閉じられるようにするため削除。
-
-        // 4. 信頼性偽装 (Referrer)
+        // 3. 信頼性偽装 (Referrer)
         try {
             hook(Activity.class.getDeclaredMethod("getReferrer")).intercept(chain -> {
                 if (isCameraActivity((Activity) chain.getThisObject()))
@@ -113,7 +110,7 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 5. Intent の動的書き換え (ロック画面起動フラグの注入)
+        // 4. Intent の動的書き換え (ロック画面起動フラグの注入)
         try {
             hook(Activity.class.getDeclaredMethod("getIntent")).intercept(chain -> {
                 Intent intent = (Intent) chain.proceed();
@@ -132,7 +129,7 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 6. SurfaceView/View 非表示化を阻止
+        // 5. SurfaceView/View 非表示化を阻止
         try {
             hook(View.class.getMethod("setVisibility", int.class)).intercept(chain -> {
                 View v = (View) chain.getThisObject();
@@ -145,8 +142,10 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 7. ライフサイクルフック（+ 自動終了機能の実装）        String[] criticalMethods = {"attachBaseContext", "onCreate", "onStart", "onResume", "onWindowFocusChanged"};
-        for (String mname : criticalMethods) {
+        // 6. ライフサイクルフック（+ 自動終了機能の実装）
+        // 変数 criticalMethods をループ前に定義
+        String[] criticalMethods = {"attachBaseContext", "onCreate", "onStart", "onResume", "onWindowFocusChanged"};
+                for (String mname : criticalMethods) {
             try {
                 Method m;
                 if ("attachBaseContext".equals(mname)) {
@@ -194,21 +193,14 @@ public class LockscreenCamera extends XposedModule {
                                         public void onReceive(Context context, Intent i) {
                                             try {
                                                 // 画面オフ時の状態確認
-                                                // ロック画面起動時かつ、現在もロック状態（入力制限中）であれば終了                                                KeyguardManager km = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
-                                                boolean shouldFinish = true;
-                                                
-                                                // isKeyguardLocked は偽装されているため使えない。
-                                                // inKeyguardRestrictedInputMode を代用に試みる
-                                                // true = ロック中（入力制限あり） / false = 解除済み（入力可能）
+                                                KeyguardManager km = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
+                                                boolean shouldFinish = true; // デフォルトは終了する                                                
                                                 if (km != null) {
-                                                    try {
-                                                        if (!km.inKeyguardRestrictedInputMode()) {
-                                                            // ロック解除済みなら終了しない（撮影継続）
-                                                            shouldFinish = false;
-                                                            log(Log.DEBUG, TAG, "Device unlocked, keeping camera open.");
-                                                        }
-                                                    } catch (Exception e) {
-                                                        // Method error -> assume finish to be safe
+                                                    // inKeyguardRestrictedInputMode: true = ロック中 (PIN/顔認証待ち) / false = 解除済み
+                                                    if (!km.inKeyguardRestrictedInputMode()) {
+                                                        // ロック解除済みなら終了しない（撮影継続）
+                                                        shouldFinish = false;
+                                                        log(Log.DEBUG, TAG, "Device unlocked (Input allowed), keeping camera open.");
                                                     }
                                                 }
                                                 
@@ -224,7 +216,6 @@ public class LockscreenCamera extends XposedModule {
                                     
                                     try {
                                         if (Build.VERSION.SDK_INT >= 33) {
-                                            // Android 13+ での登録クラッシュ回避
                                             act.registerReceiver(screenOffReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
                                         } else {
                                             act.registerReceiver(screenOffReceiver, filter);
@@ -244,7 +235,8 @@ public class LockscreenCamera extends XposedModule {
                 });
             } catch (Throwable ignored) {}
         }
-        // 8. その他システムフック群
+
+        // 7. その他システムフック群
         try {
             Class<?> callbackClass = Class.forName("android.hardware.camera2.CameraManager$AvailabilityCallback", true, param.getClassLoader());
             hook(callbackClass.getDeclaredMethod("onCameraUnavailable", String.class)).intercept(chain -> {
@@ -252,7 +244,6 @@ public class LockscreenCamera extends XposedModule {
                 return null;
             });
         } catch (Throwable ignored) {}
-
         try {
             Class<?> biometricClass = Class.forName("android.hardware.biometrics.BiometricManager", true, param.getClassLoader());
             hook(biometricClass.getDeclaredMethod("canAuthenticate", int.class)).intercept(chain -> 0);
@@ -292,7 +283,8 @@ public class LockscreenCamera extends XposedModule {
             Class<?> gestureClass = Class.forName("com.android.server.GestureLauncherService", true, param.getClassLoader());
             Method handleCameraGesture = gestureClass.getDeclaredMethod("handleCameraGesture", boolean.class, int.class);
 
-            hook(handleCameraGesture).intercept(chain -> {                try {
+            hook(handleCameraGesture).intercept(chain -> {
+                try {
                     Method getContextMethod = chain.getThisObject().getClass().getMethod("getContext");
                     Context context = (Context) getContextMethod.invoke(chain.getThisObject());
 
@@ -301,7 +293,6 @@ public class LockscreenCamera extends XposedModule {
                     
                     int flags = 0x00040000 | Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS;
                     intent.addFlags(flags);
-
                     intent.putExtra("is_secure_camera", true);
                     intent.putExtra("com.miui.camera.extra.IS_SECURE_CAMERA", true);
                     intent.putExtra("android.intent.extra.CAMERA_OPEN_ONLY", true);
@@ -341,7 +332,8 @@ public class LockscreenCamera extends XposedModule {
                 WindowManager.LayoutParams lp = window.getAttributes();
                 lp.flags |= WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                           | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                          | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON                          | WindowManager.LayoutParams.FLAG_FULLSCREEN 
+                          | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                          | WindowManager.LayoutParams.FLAG_FULLSCREEN 
                           | WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON;
                 
                 lp.flags &= ~WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD;
@@ -349,8 +341,7 @@ public class LockscreenCamera extends XposedModule {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                     lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
                 }
-                window.setAttributes(lp);
-                window.addFlags(lp.flags);
+                window.setAttributes(lp);                window.addFlags(lp.flags);
 
                 View decorView = window.getDecorView();
                 if (decorView != null) {
@@ -391,6 +382,7 @@ public class LockscreenCamera extends XposedModule {
                 }
                 fieldCache.put(cacheKey, f);
             }
+
             if (f != null) f.set(obj, value);
         } catch (Throwable ignored) {}
     }
