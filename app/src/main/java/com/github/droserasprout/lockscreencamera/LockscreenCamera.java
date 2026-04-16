@@ -10,6 +10,8 @@ import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.PixelFormat;
 import android.net.Uri;
 import android.os.Build;
@@ -88,7 +90,7 @@ public class LockscreenCamera extends XposedModule {
 
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
-        // パッケージ名のフィルタを柔軟に（GCam 対応）
+        // カメラパッケージのみを対象にする
         String pkg = param.getPackageName();
         if (!isCameraPackage(pkg)) {
             return;
@@ -145,7 +147,6 @@ public class LockscreenCamera extends XposedModule {
             hook(Activity.class.getDeclaredMethod("getIntent")).intercept(chain -> {
                 Intent intent = (Intent) chain.proceed();
                 if (isCameraActivity((Activity) chain.getThisObject()) && intent != null) {
-                    // ロック画面起動フラグの維持
                     if (intent.getBooleanExtra("com.miui.camera.extra.START_BY_KEYGUARD", false)) {
                         intent.putExtra("is_secure_camera", true);
                         intent.putExtra("ShowCameraWhenLocked", true);
@@ -192,7 +193,7 @@ public class LockscreenCamera extends XposedModule {
         }
 
         // 6. ライフサイクルフック（+ 自動終了機能の実装）
-        String[] criticalMethods = {"attachBaseContext", "onCreate", "onStart", "onResume", "onWindowFocusChanged"};
+        String[] criticalMethods = {"attachBaseContext", "onCreate", "onStart", "onResume", "onWindowFocusChanged", "onDestroy"};
 
         for (String mname : criticalMethods) {
             try {
@@ -203,6 +204,8 @@ public class LockscreenCamera extends XposedModule {
                     m = Activity.class.getDeclaredMethod("onCreate", Bundle.class);
                 } else if ("onWindowFocusChanged".equals(mname)) {
                     m = Activity.class.getDeclaredMethod("onWindowFocusChanged", boolean.class);
+                } else if ("onDestroy".equals(mname)) {
+                    m = Activity.class.getDeclaredMethod("onDestroy");
                 } else {
                     m = Activity.class.getDeclaredMethod(mname);
                 }
@@ -215,6 +218,14 @@ public class LockscreenCamera extends XposedModule {
                         boolean isTarget = isCameraActivity(act);
 
                         if (isTarget) {
+                            // onDestroy でセッションをクリーンアップ
+                            if ("onDestroy".equals(methodName)) {
+                                if (SessionManager.isActive) {
+                                    SessionManager.end();
+                                }
+                                return chain.proceed();
+                            }
+
                             if ("onWindowFocusChanged".equals(methodName)) {
                                 boolean hasFocus = (boolean) ((List<?>) chain.getArgs()).get(0);
                                 if (!hasFocus) return chain.proceed();
@@ -224,18 +235,19 @@ public class LockscreenCamera extends XposedModule {
                                 Object res = chain.proceed();
 
                                 Intent intent = act.getIntent();
-                                // アクション名ではなく、フラグで判定
+                                // フラグで判定（GCam/MIUI 共通）
                                 boolean isLockscreenLaunch = intent != null && intent.getBooleanExtra("com.miui.camera.extra.START_BY_KEYGUARD", false);
 
                                 if (isLockscreenLaunch) {
-                                    SessionManager.start(); // <--- ここで初期化
+                                    // ここ（カメラプロセス内）で Session を開始
+                                    SessionManager.start(); 
                                     log(Log.INFO, TAG, "Secure Lockscreen launch detected. Session Started.");
                                     
                                     IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_OFF);
                                     BroadcastReceiver screenOffReceiver = new BroadcastReceiver() {
                                         @Override
                                         public void onReceive(Context context, Intent i) {
-                                            SessionManager.end(); // セッション終了
+                                            SessionManager.end();
                                             act.finish();
                                         }
                                     };
@@ -344,7 +356,6 @@ public class LockscreenCamera extends XposedModule {
             if (!isCameraPackage(ctx.getPackageName())) return;
         } catch (Exception e) { return; }
 
-        // ロック画面セッション中でなければ、一切リダイレクトしない
         if (!SessionManager.isActive) return;
 
         String action = intent.getAction();
@@ -395,6 +406,7 @@ public class LockscreenCamera extends XposedModule {
         }
     }
 
+    // システムサーバー側の起動ロジックを最適化
     @Override
     public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
         try {
@@ -409,14 +421,33 @@ public class LockscreenCamera extends XposedModule {
                     KeyguardManager km = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
                     boolean isLocked = (km != null && km.isKeyguardLocked());
 
-                    // OS のデフォルトカメラ選択を尊重する
-                    Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA);
+                    // デフォルトカメラを解決
+                    Intent resolveIntent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
+                    ResolveInfo info = context.getPackageManager().resolveActivity(resolveIntent, PackageManager.MATCH_DEFAULT_ONLY);
+                    
+                    // SECURE が解決できない場合は標準アクションにフォールバック
+                    if (info == null || info.activityInfo.name.contains("Resolver")) {
+                        resolveIntent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA);
+                        info = context.getPackageManager().resolveActivity(resolveIntent, PackageManager.MATCH_DEFAULT_ONLY);
+                    }
+
+                    String pkg = info != null ? info.activityInfo.packageName : "com.android.camera";
+                    String cls = info != null ? info.activityInfo.name : "com.android.camera.Camera";
+
+                    // 常に SECURE アクションを使用（MIUI の描画トリガーとして必須）
+                    // GCam も通常は SECURE をサポートしている
+                    Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
+
+                    // MIUI Camera の場合は Component を明示して描画を確実化
+                    // GCam などの場合は Component を設定せず OS の「常時」設定を尊重
+                    if (pkg.equals("com.android.camera")) {
+                        intent.setComponent(new ComponentName(pkg, cls));
+                    }
 
                     int flags = 0x00040000 | Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP;
 
                     if (isLocked) {
                         flags |= Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS;
-                        // ロック画面からの起動であることをフラグで伝える（フック用）
                         intent.putExtra("com.miui.camera.extra.START_BY_KEYGUARD", true);
                         intent.putExtra("StartActivityWhenLocked", true);
                         intent.putExtra("is_secure_camera", true);
@@ -433,8 +464,6 @@ public class LockscreenCamera extends XposedModule {
                     if (Build.VERSION.SDK_INT >= 34) {
                         options.setPendingIntentBackgroundActivityStartMode(2);
                     }
-
-                    SessionManager.start(); // セッション開始
 
                     context.startActivity(intent, options.toBundle());
                     return true;
@@ -467,6 +496,10 @@ public class LockscreenCamera extends XposedModule {
                           | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
                           | WindowManager.LayoutParams.FLAG_FULLSCREEN
                           | WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON;
+                
+                // 描画レイヤーを最前面に固定し、背面に隠れるのを防ぐ
+                lp.flags |= WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN 
+                          | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
 
                 lp.flags &= ~WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD;
 
