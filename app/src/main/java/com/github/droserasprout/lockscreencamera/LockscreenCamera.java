@@ -27,6 +27,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import android.net.Uri;
+import android.content.ContentResolver;
+import android.content.ContentValues;
+
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
@@ -52,23 +58,24 @@ public class LockscreenCamera extends XposedModule {
         super();
     }
 
-    // === クラス直下に追加 ===
     public static class SessionManager {
         public static volatile boolean isActive = false;
-        // スレッドセーフなリストでURIを保持
-        public static final java.util.List<android.net.Uri> SESSION_URIS = java.util.concurrent.CopyOnWriteArrayList();
+
+        public static final List<Uri> SESSION_URIS = new CopyOnWriteArrayList<>();
 
         public static void start() {
             isActive = true;
             SESSION_URIS.clear();
-            Log.i(TAG, "Secure Camera Session Started");
+            Log.i(TAG, "📸 Secure Camera Session Started");
         }
+
         public static void end() {
             isActive = false;
             SESSION_URIS.clear();
-            Log.i(TAG, "Secure Camera Session Cleared");
+            Log.i(TAG, "🔒 Secure Camera Session Cleared");
         }
-        public static void add(android.net.Uri uri) {
+
+        public static void add(Uri uri) {
             if (isActive && uri != null) {
                 SESSION_URIS.add(uri);
             }
@@ -282,6 +289,24 @@ public class LockscreenCamera extends XposedModule {
                         // 画像保存のみを対象にフィルタリング
                         if (uri != null && uri.toString().contains("external/images")) {
                             Uri returnedUri = (Uri) chain.proceed();
+                            SessionManager.add(returnedUri);
+                            return returnedUri;
+                        }
+                    }
+                    return chain.proceed();
+                });
+        } catch (Throwable ignored) {}
+        
+        try {
+            hook(ContentResolver.class.getDeclaredMethod("insert", Uri.class, ContentValues.class))
+                .intercept(chain -> {
+                    // セッション中かつ、画像フォルダへの保存であれば追跡
+                    if (SessionManager.isActive) {
+                        Uri uri = (Uri) chain.getArgs().get(0);
+                        if (uri != null && uri.toString().contains("external/images")) {
+                            // 本来の保存処理を実行
+                            Uri returnedUri = (Uri) chain.proceed();
+                            // 保存されたURIをセッションリストに追加
                             SessionManager.add(returnedUri);
                             return returnedUri;
                         }
