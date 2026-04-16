@@ -52,6 +52,7 @@ public class SecureViewerActivity extends Activity {
         // 2. データの受け取り（Intent から）
         List<Uri> uris = getIntent().getParcelableArrayListExtra("session_photos_list");
 
+        // フォールバック処理を簡潔に
         if (uris == null || uris.isEmpty()) {
             Uri singleUri = getIntent().getData();
             if (singleUri != null) {
@@ -83,8 +84,6 @@ public class SecureViewerActivity extends Activity {
         adapter = new PhotoAdapter(uris);
         viewPager.setAdapter(adapter);
         viewPager.setCurrentItem(uris.size() - 1, false);
-
-        Toast.makeText(this, "下にスワイプで終了 | ピンチでズーム", Toast.LENGTH_SHORT).show();
 
         // 4. 画面OFFで自動終了
         screenOffReceiver = new BroadcastReceiver() {

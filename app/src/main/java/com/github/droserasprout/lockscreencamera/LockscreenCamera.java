@@ -264,10 +264,10 @@ public class LockscreenCamera extends XposedModule {
                 .intercept(chain -> {
                     if (SessionManager.isActive) {
                         Uri uri = (Uri) chain.getArgs().get(0);
-                        // 画像保存のみを対象にフィルタリング
-                        if (uri != null && uri.toString().contains("external/images")) {
+                        // フィルタを緩めて /DCIM/ や /Pictures/ も捕捉。null ならとりあえず追加
+                        if (uri != null) {
                             Uri returnedUri = (Uri) chain.proceed();
-                            SessionManager.add(returnedUri); // リストに追加
+                            SessionManager.add(returnedUri != null ? returnedUri : uri);
                             return returnedUri;
                         }
                     }
@@ -311,8 +311,12 @@ public class LockscreenCamera extends XposedModule {
     /**
      * ギャラリー起動インテントをモジュール内の SecureViewerActivity へ強制リダイレクト
      */
+    // 【修正】Gallery Redirect メソッドを完全入れ替え
     private void handleGalleryRedirect(Context ctx, Intent intent) {
         if (ctx == null || intent == null || intent.getAction() == null) return;
+
+        // 🔒 ロック画面セッション中でなければ、一切リダイレクトしない（通常起動時の誤発動を防止）
+        if (!SessionManager.isActive) return;
 
         try {
             if (!"com.android.camera".equals(ctx.getPackageName())) return;
@@ -323,35 +327,40 @@ public class LockscreenCamera extends XposedModule {
                             Intent.ACTION_PICK.equals(action) ||
                             action.contains("REVIEW");
 
-        // URIが存在する場合のみリダイレクト（プレビューボタンの判定材料）
+        // プレビューボタンが押された場合のみ処理
         if (isGallery && intent.getData() != null) {
-            Log.i(TAG, "Redirecting to SecureViewer (Session Photo)");
+            Log.i(TAG, "Redirecting to SecureViewer (Session Photos)");
 
-            // 1. 宛先を自前の SecureViewerActivity に差し替え
+            // セッション内の全画像リストを作成
+            ArrayList<Uri> uriList = new ArrayList<>();
+            if (!SessionManager.SESSION_URIS.isEmpty()) {
+                uriList.addAll(SessionManager.SESSION_URIS);
+            }
+            // 万が一リストが空でも、タップされた画像は必ず表示する
+            if (uriList.isEmpty() && intent.getData() != null) {
+                uriList.add(intent.getData());
+            }
+
+            // 宛先を自前ビューアに差し替え
             intent.setComponent(new ComponentName(
                     "com.github.droserasprout.lockscreencamera",
                     "com.github.droserasprout.lockscreencamera.SecureViewerActivity"
             ));
-            intent.setPackage(null); // 外部固定を解除
+            intent.setPackage(null);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.ICE_CREAM_SANDWICH) {
-                intent.setSelector(null); // セレクター絞り込みも解除
+                intent.setSelector(null);
             }
 
-            // セッションの URI リストを Intent に載せて渡す（プロセス間通信）
-            if (!SessionManager.SESSION_URIS.isEmpty()) {
-                ArrayList<Uri> uriList = new ArrayList<>(SessionManager.SESSION_URIS);
-                intent.putParcelableArrayListExtra("session_photos_list", uriList);
-                Log.i(TAG, "Passed " + uriList.size() + " photos to viewer");
-            } else {
-                 Log.w(TAG, "Session list empty (fallback to single photo)");
-            }
+            // リストを Intent に詰め込み
+            intent.putParcelableArrayListExtra("session_photos_list", uriList);
+            Log.i(TAG, "Passed " + uriList.size() + " photos to viewer");
 
-            // 2. 権限・表示フラグの確保
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            intent.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            intent.addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
-            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            // 権限・表示フラグ
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                            Intent.FLAG_ACTIVITY_NEW_TASK |
+                            Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS |
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP);
         }
     }
 
