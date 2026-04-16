@@ -11,13 +11,17 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
-import android.view.Gravity;
-import android.view.View;
+import android.view.GestureDetector;
+import android.view.MotionEvent;
 import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.widget.HorizontalScrollView;
-import android.widget.ImageView;
-import android.widget.LinearLayout;
+import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.recyclerview.widget.RecyclerView;
+import androidx.viewpager2.widget.ViewPager2;
+
+import com.github.chrisbanes.photoview.PhotoView;
 
 import java.io.InputStream;
 import java.util.ArrayList;
@@ -30,7 +34,8 @@ public class SecureViewerActivity extends Activity {
     private static final String TAG = "SecureViewer";
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private BroadcastReceiver screenOffReceiver;
-    private LinearLayout photoContainer;
+    private ViewPager2 viewPager;
+    private PhotoAdapter adapter;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -45,25 +50,7 @@ public class SecureViewerActivity extends Activity {
         // スクリーンショット/録画を物理的に防止
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
 
-        // 2. スクロールビューの構築
-        // photoContainer の幅を WRAP_CONTENT にすることで、画像が増えると横に伸びてスクロール可能になる
-        photoContainer = new LinearLayout(this);
-        photoContainer.setOrientation(LinearLayout.HORIZONTAL);
-        photoContainer.setGravity(Gravity.CENTER_VERTICAL); // 縦方向は中央揃え
-        // 横幅は画像の分だけ伸びる (WRAP_CONTENT)
-        photoContainer.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, 
-                LinearLayout.LayoutParams.MATCH_PARENT));
-
-        HorizontalScrollView scrollView = new HorizontalScrollView(this);
-        scrollView.setLayoutParams(new ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 
-                ViewGroup.LayoutParams.MATCH_PARENT));
-        scrollView.setFillViewport(true); // スクロールビューをビューポートで満たす
-        scrollView.addView(photoContainer);
-        setContentView(scrollView);
-
-        // 3. データの受け取り（Intent から）
+        // 2. データの受け取り（Intent から）
         List<Uri> uris = getIntent().getParcelableArrayListExtra("session_photos_list");
 
         // フォールバック: リストが空でも、単一画像の Intent Data はあるか確認
@@ -76,15 +63,45 @@ public class SecureViewerActivity extends Activity {
             }
         }
 
-        if (uris != null && !uris.isEmpty()) {
-            loadSessionPhotos(uris);
-        } else {
+        if (uris == null || uris.isEmpty()) {
             Log.w(TAG, "No photos to show");
             finish();
             return;
         }
 
-        // 4. 画面OFFで自動終了
+        // 3. UIの構築 (ViewPager2)
+        viewPager = new ViewPager2(this);
+        viewPager.setLayoutParams(new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        viewPager.setBackgroundColor(0xFF000000); // 背景を黒で統一
+        setContentView(viewPager);
+
+        // Adapterのセット
+        adapter = new PhotoAdapter(uris);
+        viewPager.setAdapter(adapter);
+
+        // 初期位置を最新の画像（右端）に設定
+        viewPager.setCurrentItem(uris.size() - 1, false);
+
+        // 4. 操作性の改善 (ダブルタップで終了)
+        GestureDetector gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+            @Override
+            public boolean onDoubleTap(MotionEvent e) {
+                finish();
+                return true;
+            }
+        });
+
+        // ViewPager2のスクロールを妨げないようにしつつ、ジェスチャーを検知
+        viewPager.setOnTouchListener((v, event) -> {
+            gestureDetector.onTouchEvent(event);
+            return false;
+        });
+
+        Toast.makeText(this, "ダブルタップで終了 | ピンチでズーム", Toast.LENGTH_SHORT).show();
+
+        // 5. 画面OFFで自動終了
         screenOffReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) { finish(); }
         };
@@ -96,54 +113,44 @@ public class SecureViewerActivity extends Activity {
         }
     }
 
-    private void loadSessionPhotos(List<Uri> uris) {
-        executor.execute(() -> {
-            for (Uri uri : uris) {
-                try (InputStream is = getContentResolver().openInputStream(uri)) {
-                    Bitmap bitmap = BitmapFactory.decodeStream(is);
-                    if (bitmap != null) {
-                        runOnUiThread(() -> addPhotoView(bitmap));
-                    }
-                } catch (Exception e) {
-                    Log.e(TAG, "Failed to load: " + uri, e);
-                }
+    // OOM対策: 画面サイズに合わせて画像を縮小して読み込む
+    private Bitmap decodeSampledBitmapFromUri(Uri uri, int reqWidth, int reqHeight) {
+        try {
+            // 1. 画像のサイズだけ読み込む
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inJustDecodeBounds = true;
+            try (InputStream is = getContentResolver().openInputStream(uri)) {
+                BitmapFactory.decodeStream(is, null, options);
             }
-            // 全画像読み込み後、最新の画像までスクロール
-            runOnUiThread(() -> {
-                if (photoContainer.getChildCount() > 0) {
-                    photoContainer.post(() -> {
-                        View lastChild = photoContainer.getChildAt(photoContainer.getChildCount() - 1);
-                        // 右端へスクロール
-                        ((HorizontalScrollView) lastChild.getParent()).fullScroll(View.FOCUS_RIGHT);
-                    });
-                }
-            });
-        });
+
+            // 2. 縮小率を計算
+            options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight);
+            options.inJustDecodeBounds = false;
+
+            // 3. 縮小して読み込む
+            try (InputStream is = getContentResolver().openInputStream(uri)) {
+                return BitmapFactory.decodeStream(is, null, options);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to decode: " + uri, e);
+            return null;
+        }
     }
 
-    private void addPhotoView(Bitmap bitmap) {
-        ImageView iv = new ImageView(this);
-        iv.setScaleType(ImageView.ScaleType.FIT_CENTER); // 画像全体を表示
-        
-        // 画像間のスペース
-        int padding = 10; 
-        iv.setPadding(padding, padding, padding, padding);
+    private int calculateInSampleSize(BitmapFactory.Options options, int reqWidth, int reqHeight) {
+        final int height = options.outHeight;
+        final int width = options.outWidth;
+        int inSampleSize = 1;
 
-        // 幅：画面幅 (widthPixels)
-        // 高さ：画像のアスペクト比に合わせる (WRAP_CONTENT)
-        int screenWidth = getResources().getDisplayMetrics().widthPixels;
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                screenWidth, 
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        iv.setLayoutParams(params);
-        
-        iv.setImageBitmap(bitmap);
-        iv.setBackgroundColor(0xFF000000); // 背景は黒
-        
-        // タップで終了
-        iv.setOnClickListener(v -> finish());
-        
-        photoContainer.addView(iv);
+        if (height > reqHeight || width > reqWidth) {
+            final int halfHeight = height / 2;
+            final int halfWidth = width / 2;
+            while ((halfHeight / inSampleSize) >= reqHeight
+                    && (halfWidth / inSampleSize) >= reqWidth) {
+                inSampleSize *= 2;
+            }
+        }
+        return inSampleSize;
     }
 
     @Override
@@ -153,5 +160,68 @@ public class SecureViewerActivity extends Activity {
             try { unregisterReceiver(screenOffReceiver); } catch (Exception ignored) {}
         }
         executor.shutdownNow();
+    }
+
+    // ViewPager2用のRecyclerView Adapter
+    private class PhotoAdapter extends RecyclerView.Adapter<PhotoAdapter.PhotoViewHolder> {
+        private final List<Uri> uris;
+
+        PhotoAdapter(List<Uri> uris) {
+            this.uris = uris;
+        }
+
+        @NonNull
+        @Override
+        public PhotoViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
+            // ImageViewの代わりにPhotoViewを使用
+            PhotoView photoView = new PhotoView(parent.getContext());
+            photoView.setBackgroundColor(0xFF000000);
+            photoView.setLayoutParams(new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT));
+            
+            // ピンチズームを有効にする（デフォルトで有効だが明示的に設定）
+            photoView.setZoomable(true);
+            // ダブルタップズームを無効にする（終了操作と競合を避けるため）
+            photoView.setAllowDoubleTapZoom(false);
+            
+            return new PhotoViewHolder(photoView);
+        }
+
+        @Override
+        public void onBindViewHolder(@NonNull PhotoViewHolder holder, int position) {
+            holder.photoView.setImageDrawable(null); // リサイクル時にクリア
+
+            executor.execute(() -> {
+                int screenWidth = getResources().getDisplayMetrics().widthPixels;
+                int screenHeight = getResources().getDisplayMetrics().heightPixels;
+                Bitmap bitmap = decodeSampledBitmapFromUri(uris.get(position), screenWidth, screenHeight);
+
+                if (bitmap != null) {
+                    runOnUiThread(() -> {
+                        // 非同期読み込み完了時に位置が変わっていないか確認
+                        if (holder.getAdapterPosition() == position) {
+                            holder.photoView.setImageBitmap(bitmap);
+                        } else {
+                            bitmap.recycle();
+                        }
+                    });
+                }
+            });
+        }
+
+        @Override
+        public int getItemCount() {
+            return uris.size();
+        }
+
+        class PhotoViewHolder extends RecyclerView.ViewHolder {
+            PhotoView photoView;
+
+            PhotoViewHolder(PhotoView pv) {
+                super(pv);
+                photoView = pv;
+            }
+        }
     }
 }
