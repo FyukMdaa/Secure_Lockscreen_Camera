@@ -11,10 +11,10 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
-import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.widget.FrameLayout;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
@@ -47,13 +47,11 @@ public class SecureViewerActivity extends Activity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setInheritShowWhenLocked(true);
         }
-        // スクリーンショット/録画を物理的に防止
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
 
         // 2. データの受け取り（Intent から）
         List<Uri> uris = getIntent().getParcelableArrayListExtra("session_photos_list");
 
-        // フォールバック: リストが空でも、単一画像の Intent Data はあるか確認
         if (uris == null || uris.isEmpty()) {
             Uri singleUri = getIntent().getData();
             if (singleUri != null) {
@@ -74,34 +72,21 @@ public class SecureViewerActivity extends Activity {
         viewPager.setLayoutParams(new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
-        viewPager.setBackgroundColor(0xFF000000); // 背景を黒で統一
-        setContentView(viewPager);
+        viewPager.setBackgroundColor(0xFF000000);
+
+        // 下スワイプで閉じるためのラップレイアウトを作成
+        SwipeDismissLayout container = new SwipeDismissLayout(this);
+        container.addView(viewPager);
+        setContentView(container);
 
         // Adapterのセット
         adapter = new PhotoAdapter(uris);
         viewPager.setAdapter(adapter);
-
-        // 初期位置を最新の画像（右端）に設定
         viewPager.setCurrentItem(uris.size() - 1, false);
 
-        // 4. 操作性の改善 (ダブルタップで終了)
-        GestureDetector gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
-            @Override
-            public boolean onDoubleTap(MotionEvent e) {
-                finish();
-                return true;
-            }
-        });
+        Toast.makeText(this, "下にスワイプで終了 | ピンチでズーム", Toast.LENGTH_SHORT).show();
 
-        // ViewPager2のスクロールを妨げないようにしつつ、ジェスチャーを検知
-        viewPager.setOnTouchListener((v, event) -> {
-            gestureDetector.onTouchEvent(event);
-            return false;
-        });
-
-        Toast.makeText(this, "ダブルタップで終了 | ピンチでズーム", Toast.LENGTH_SHORT).show();
-
-        // 5. 画面OFFで自動終了
+        // 4. 画面OFFで自動終了
         screenOffReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) { finish(); }
         };
@@ -162,7 +147,80 @@ public class SecureViewerActivity extends Activity {
         executor.shutdownNow();
     }
 
-    // ViewPager2用のRecyclerView Adapter
+    // 下スワイプ判定を行うカスタムレイアウト
+    private class SwipeDismissLayout extends FrameLayout {
+        private float initialY;
+        private float initialX;
+        private boolean isSwiping;
+        private final float swipeThreshold;
+
+        public SwipeDismissLayout(Context context) {
+            super(context);
+            // 画面の高さの20%を「閉じる」の閾値にする
+            swipeThreshold = getResources().getDisplayMetrics().heightPixels * 0.2f;
+        }
+
+        @Override
+        public boolean onInterceptTouchEvent(MotionEvent ev) {
+            switch (ev.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    initialY = ev.getY();
+                    initialX = ev.getX();
+                    isSwiping = false;
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    float dy = ev.getY() - initialY;
+                    float dx = Math.abs(ev.getX() - initialX);
+
+                    // 下方向(Yがプラス)に指が動き、横方向より縦方向の移動が大きい場合
+                    if (dy > 50 && dy > dx) {
+                        isSwiping = true;
+                        // ViewPager2の横スクロールを無効化し、縦イベントを奪う
+                        return true; 
+                    }
+                    break;
+            }
+            return super.onInterceptTouchEvent(ev);
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent ev) {
+            if (!isSwiping) return super.onTouchEvent(ev);
+
+            switch (ev.getActionMasked()) {
+                case MotionEvent.ACTION_MOVE:
+                    float dy = ev.getY() - initialY;
+                    // 上には戻さない（指を上に動かしても0止まり）
+                    float translationY = Math.max(0, dy);
+                    float progress = translationY / getHeight();
+
+                    // ViewPager2を指に追従して動かす ＆ 少しずつ透明にする
+                    viewPager.setTranslationY(translationY);
+                    viewPager.setAlpha(1.0f - (progress * 0.8f));
+                    break;
+
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    if (viewPager.getTranslationY() > swipeThreshold) {
+                        // 閾値を超えたらそのままフェードアウトして終了
+                        viewPager.setAlpha(0f);
+                        finish();
+                    } else {
+                        // 閾値を超えなければバネのように元の位置に戻す
+                        viewPager.animate()
+                                .translationY(0)
+                                .alpha(1.0f)
+                                .setDuration(200)
+                                .withStartAction(() -> isSwiping = false)
+                                .start();
+                    }
+                    break;
+            }
+            return true;
+        }
+    }
+
+    // Adapter
     private class PhotoAdapter extends RecyclerView.Adapter<PhotoAdapter.PhotoViewHolder> {
         private final List<Uri> uris;
 
@@ -173,24 +231,18 @@ public class SecureViewerActivity extends Activity {
         @NonNull
         @Override
         public PhotoViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
-            // ImageViewの代わりにPhotoViewを使用
             PhotoView photoView = new PhotoView(parent.getContext());
             photoView.setBackgroundColor(0xFF000000);
             photoView.setLayoutParams(new ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT));
-            
-            // ピンチズームを有効にする（デフォルトで有効だが明示的に設定）
             photoView.setZoomable(true);
-            // ダブルタップズームを無効にする（終了操作と競合を避けるため）
-            photoView.setAllowDoubleTapZoom(false);
-            
             return new PhotoViewHolder(photoView);
         }
 
         @Override
         public void onBindViewHolder(@NonNull PhotoViewHolder holder, int position) {
-            holder.photoView.setImageDrawable(null); // リサイクル時にクリア
+            holder.photoView.setImageDrawable(null);
 
             executor.execute(() -> {
                 int screenWidth = getResources().getDisplayMetrics().widthPixels;
@@ -199,7 +251,6 @@ public class SecureViewerActivity extends Activity {
 
                 if (bitmap != null) {
                     runOnUiThread(() -> {
-                        // 非同期読み込み完了時に位置が変わっていないか確認
                         if (holder.getAdapterPosition() == position) {
                             holder.photoView.setImageBitmap(bitmap);
                         } else {
