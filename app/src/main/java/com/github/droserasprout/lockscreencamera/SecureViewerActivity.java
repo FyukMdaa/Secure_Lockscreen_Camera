@@ -20,6 +20,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -58,14 +59,32 @@ public class SecureViewerActivity extends Activity {
         scrollView.addView(photoContainer);
         setContentView(scrollView);
 
-        // 3. セッション内の画像を非同期で読み込み
-        loadSessionPhotos();
+        // 3. データの受け取り（Intent から）
+        // ロック画面起動の場合は SessionManager.start() でリストがクリアされ、
+        // 撮影ごとに add() されている。HandleGalleryRedirect で Intent に詰め替えて渡されている。
+        List<Uri> uris = getIntent().getParcelableArrayListExtra("session_photos_list");
+
+        // フォールバック: リストが空でも、単一画像の Intent Data はあるか確認
+        if (uris == null || uris.isEmpty()) {
+            Uri singleUri = getIntent().getData();
+            if (singleUri != null) {
+                uris = new ArrayList<>();
+                uris.add(singleUri);
+                Log.i(TAG, "Fallback to single image from Intent Data");
+            }
+        }
+
+        if (uris != null && !uris.isEmpty()) {
+            loadSessionPhotos(uris);
+        } else {
+            Log.w(TAG, "No photos to show");
+            finish();
+            return;
+        }
 
         // 4. 画面OFFで自動終了＆セッションクリア
         screenOffReceiver = new BroadcastReceiver() {
-            @Override public void onReceive(Context context, Intent intent) {
-                finish();
-            }
+            @Override public void onReceive(Context context, Intent intent) { finish(); }
         };
         IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_OFF);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -75,13 +94,7 @@ public class SecureViewerActivity extends Activity {
         }
     }
 
-    private void loadSessionPhotos() {
-        List<Uri> uris = LockscreenCamera.SessionManager.SESSION_URIS;
-        if (uris.isEmpty()) {
-            finish();
-            return;
-        }
-
+    private void loadSessionPhotos(List<Uri> uris) {
         executor.execute(() -> {
             for (Uri uri : uris) {
                 try (InputStream is = getContentResolver().openInputStream(uri)) {
