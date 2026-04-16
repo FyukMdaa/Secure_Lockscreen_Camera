@@ -58,7 +58,7 @@ public class LockscreenCamera extends XposedModule {
             return;
         }
 
-        log(Log.INFO, TAG, "Targeting com.android.camera (Secure Gallery Bypass / Dual-Hook)");
+        log(Log.INFO, TAG, "Targeting com.android.camera (Secure Gallery Bypass / Compilation Fix)");
 
         // 0. DecorView の透明化・非表示化を物理的に阻止
         try {
@@ -135,53 +135,28 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 5. Secure Gallery Bypass (リダイレクトの徹底 / Dual-Hook)
-        // startActivity と startActivityForResult の両方をカバーし、外部ギャラリーへの遷移を100%内部へリダイレクト
+        // 5. Secure Gallery Bypass (リダイレクトの徹底)
+        // startActivity と startActivityForResult の両方をカバーし、外部ギャラリーへの遷移を内部へリダイレクト
         try {
-            io.github.libxposed.api.Interceptor galleryHook = chain -> {
-                Activity caller = (Activity) chain.getThisObject();
-                Intent outIntent = (Intent) chain.getArgs().get(0); // 最初の引数は必ずIntent
-
-                if (isCameraActivity(caller) && isSecureSession(caller) && outIntent != null) {
-                    String action = outIntent.getAction();
-                    // ギャラリー/レビュー関連のアクションを捕捉
-                    boolean isGalleryIntent = Intent.ACTION_VIEW.equals(action) ||
-                                              Intent.ACTION_PICK.equals(action) ||
-                                              "android.intent.action.GET_CONTENT".equals(action) ||
-                                              "com.android.camera.action.REVIEW".equals(action);
-
-                    if (isGalleryIntent) {
-                        log(Log.INFO, TAG, "Forcing redirection to Internal Camera Activity from: " + action);
-
-                        // 特定パッケージ（Googleフォト等）への固定を完全に解除
-                        outIntent.setPackage(null);
-                        // 自分自身（カメラアプリ）をターゲットに設定
-                        outIntent.setComponent(new ComponentName("com.android.camera", "com.android.camera.Camera"));
-
-                        // ロック画面上での表示を強制
-                        outIntent.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
-                        outIntent.addFlags(WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
-                        // URIアクセス権の付与（写真データを見るために必要）
-                        outIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-
-                        // プレビューモード用フラグ注入
-                        outIntent.putExtra("from_gallery", true);
-                        outIntent.putExtra("is_secure_camera", true);
-
-                        // データタイプの上書き（必要に応じて）
-                        if (outIntent.getData() != null) {
-                            outIntent.setDataAndType(outIntent.getData(), "image/*");
-                        }
-                    }
-                }
-                return chain.proceed();
-            };
-
             // startActivity(Intent) をフック
-            hook(Activity.class.getDeclaredMethod("startActivity", Intent.class)).intercept(galleryHook);
+            hook(Activity.class.getDeclaredMethod("startActivity", Intent.class)).intercept(chain -> {
+                Activity caller = (Activity) chain.getThisObject();
+                Intent outIntent = (Intent) chain.getArgs().get(0);
+                handleGalleryRedirect(caller, outIntent);
+                return chain.proceed();
+            });
+
             // startActivityForResult(Intent, int) をフック
-            hook(Activity.class.getDeclaredMethod("startActivityForResult", Intent.class, int.class)).intercept(galleryHook);
-            
+            try {
+                hook(Activity.class.getDeclaredMethod("startActivityForResult", Intent.class, int.class)).intercept(chain -> {
+                    Activity caller = (Activity) chain.getThisObject();
+                    Intent outIntent = (Intent) chain.getArgs().get(0);
+                    handleGalleryRedirect(caller, outIntent);
+                    return chain.proceed();
+                });
+            } catch (NoSuchMethodException ignored) {
+                // メソッドが存在しない場合は無視
+            }
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "Failed to hook startActivity variations", t);
         }
@@ -289,7 +264,9 @@ public class LockscreenCamera extends XposedModule {
         } catch (Throwable ignored) {}
     }
 
-    // ヘルパーメソッド群
+    /**
+     * ヘルパーメソッド群
+     */
     private boolean isCameraActivity(Activity act) {
         try { return act != null && "com.android.camera".equals(act.getPackageName()); } 
         catch (Exception e) { try { return act.getClass().getName().startsWith("com.android.camera"); } catch (Exception e2) { return false; } }
@@ -306,13 +283,46 @@ public class LockscreenCamera extends XposedModule {
         return v.getClass().getName().endsWith("DecorView");
     }
 
-    // 現在のアクティビティがセキュアセッション中か判定するヘルパー
     private boolean isSecureSession(Activity act) {
         try {
             Intent intent = act.getIntent();
             return intent != null && MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE.equals(intent.getAction());
         } catch (Exception e) {
             return false;
+        }
+    }
+
+    /**
+     * ギャラリー起動インテントを内部カメラアプリへリダイレクトする処理
+     */
+    private void handleGalleryRedirect(Activity caller, Intent outIntent) {
+        if (isCameraActivity(caller) && isSecureSession(caller) && outIntent != null) {
+            String action = outIntent.getAction();
+            // ギャラリー/レビュー関連のアクションか確認
+            boolean isGalleryIntent = Intent.ACTION_VIEW.equals(action) ||
+                                      Intent.ACTION_PICK.equals(action) ||
+                                      "android.intent.action.GET_CONTENT".equals(action) ||
+                                      "com.android.camera.action.REVIEW".equals(action);
+
+            if (isGalleryIntent) {
+                log(Log.INFO, TAG, "Forcing redirection: " + outIntent.getPackage() + " -> Internal");
+
+                // 特定パッケージ（Googleフォト等）への固定を解除（権限エラー回避の最重要ポイント）
+                outIntent.setPackage(null);
+                // 自分自身（カメラアプリ）をターゲットに設定
+                outIntent.setComponent(new ComponentName("com.android.camera", "com.android.camera.Camera"));
+
+                // フラグの注入
+                outIntent.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
+                outIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                outIntent.putExtra("from_gallery", true);
+                outIntent.putExtra("is_secure_camera", true);
+
+                // Googleフォト等の特定のクラスを呼ぼうとするインテントデータを上書き
+                if (outIntent.getData() != null) {
+                    outIntent.setDataAndType(outIntent.getData(), "image/*");
+                }
+            }
         }
     }
 
