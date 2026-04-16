@@ -288,43 +288,40 @@ public class LockscreenCamera extends XposedModule {
     }
 
     /**
-     * ギャラリー起動インテントを内部カメラアプリへ強制リダイレクトする処理
-     * (Activity 以外からの呼び出しも考慮)
+     * ギャラリー起動インテントをモジュール内の SecureViewerActivity へ強制リダイレクト
      */
     private void handleGalleryRedirect(Context ctx, Intent intent) {
         if (ctx == null || intent == null || intent.getAction() == null) return;
         
         try {
-            // パッケージチェック
-            String pkg = ctx.getPackageName();
-            if (!"com.android.camera".equals(pkg)) return;
+            if (!"com.android.camera".equals(ctx.getPackageName())) return;
         } catch (Exception e) { return; }
 
         String action = intent.getAction();
-        boolean isGallery = Intent.ACTION_VIEW.equals(action) ||
+        boolean isGallery = Intent.ACTION_VIEW.equals(action) || 
                             Intent.ACTION_PICK.equals(action) ||
-                            "android.intent.action.GET_CONTENT".equals(action) ||
                             action.contains("REVIEW");
                             
-        if (isGallery) {
-            log(Log.INFO, TAG, "Forcing internal redirect from: " + intent.getPackage());
+        // URIが存在する場合のみリダイレクト（プレビューボタンの判定材料）
+        if (isGallery && intent.getData() != null) {
+            Log.i(TAG, "Redirecting to SecureViewer (Session Photo)");
             
-            // 1. 宛先の完全洗浄
-            intent.setComponent(new ComponentName("com.android.camera", "com.android.camera.Camera"));
-            intent.setPackage(null); // Googleフォト等のハードコードを解除
+            // 1. 宛先を自前の SecureViewerActivity に差し替え
+            intent.setComponent(new ComponentName(
+                    "com.github.droserasprout.lockscreencamera", 
+                    "com.github.droserasprout.lockscreencamera.SecureViewerActivity"
+            ));
+            intent.setPackage(null); // 外部固定を解除
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.ICE_CREAM_SANDWICH) {
-                intent.setSelector(null); // セレクターによる絞り込みも解除
+                intent.setSelector(null); // セレクター絞り込みも解除
             }
             
-            // 2. セキュアモードフラグ
-            intent.putExtra("is_secure_camera", true);
-            intent.putExtra("com.miui.camera.extra.IS_SECURE_CAMERA", true);
-            intent.putExtra("from_gallery", true);
-            
-            // 3. ロック画面表示 & 権限付与
-            intent.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
-                            Intent.FLAG_ACTIVITY_NEW_TASK |
-                            Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            // 2. 権限・表示フラグの確保
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            intent.addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
         }
     }
 
