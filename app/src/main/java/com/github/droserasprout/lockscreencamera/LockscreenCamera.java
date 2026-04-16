@@ -4,13 +4,12 @@ import android.app.Activity;
 import android.app.ActivityOptions;
 import android.app.KeyguardManager;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
 import android.graphics.PixelFormat;
 import android.net.Uri;
 import android.os.Build;
@@ -22,7 +21,6 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.content.ContentResolver;
 import android.content.ContentValues;
-import android.content.ClipData; // ClipData のインポート確認
 
 import androidx.annotation.NonNull;
 
@@ -90,6 +88,7 @@ public class LockscreenCamera extends XposedModule {
 
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
+        // パッケージ名のフィルタを柔軟に（GCam 対応）
         String pkg = param.getPackageName();
         if (!isCameraPackage(pkg)) {
             return;
@@ -141,18 +140,15 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 3. Intent の動的書き換え (ロック画面起動フラグの注入)
+        // 3. Intent の動的書き換え
         try {
             hook(Activity.class.getDeclaredMethod("getIntent")).intercept(chain -> {
                 Intent intent = (Intent) chain.proceed();
                 if (isCameraActivity((Activity) chain.getThisObject()) && intent != null) {
-                    if (MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE.equals(intent.getAction())) {
-                        if (!intent.getBooleanExtra("com.miui.camera.extra.START_BY_KEYGUARD", false)) {
-                            intent.putExtra("com.miui.camera.extra.START_BY_KEYGUARD", true);
-                            intent.putExtra("is_secure_camera", true);
-                            intent.putExtra("ShowCameraWhenLocked", true);
-                            intent.putExtra("StartFromKeyguard", true);
-                        }
+                    // ロック画面起動フラグの維持
+                    if (intent.getBooleanExtra("com.miui.camera.extra.START_BY_KEYGUARD", false)) {
+                        intent.putExtra("is_secure_camera", true);
+                        intent.putExtra("ShowCameraWhenLocked", true);
                     }
                 }
                 return intent;
@@ -172,7 +168,7 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 5. Secure Gallery Redirect (Contextレベルフック & インテント完全洗浄)
+        // 5. Secure Gallery Redirect
         try {
             Method startAct = Activity.class.getDeclaredMethod("startActivity", Intent.class);
             hook(startAct).intercept(chain -> {
@@ -216,7 +212,6 @@ public class LockscreenCamera extends XposedModule {
                     Object thisObj = chain.getThisObject();
                     if (thisObj instanceof Activity) {
                         Activity act = (Activity) thisObj;
-                        // isCameraActivity で判定
                         boolean isTarget = isCameraActivity(act);
 
                         if (isTarget) {
@@ -229,11 +224,10 @@ public class LockscreenCamera extends XposedModule {
                                 Object res = chain.proceed();
 
                                 Intent intent = act.getIntent();
-                                boolean isSecureAction = intent != null && MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE.equals(intent.getAction());
-                                // GCam などのためにフラグ名を柔軟に、あるいは START_BY_KEYGUARD 判定
+                                // アクション名ではなく、フラグで判定
                                 boolean isLockscreenLaunch = intent != null && intent.getBooleanExtra("com.miui.camera.extra.START_BY_KEYGUARD", false);
 
-                                if (isLockscreenLaunch && isSecureAction) {
+                                if (isLockscreenLaunch) {
                                     SessionManager.start(); // <--- ここで初期化
                                     log(Log.INFO, TAG, "Secure Lockscreen launch detected. Session Started.");
                                     
@@ -269,8 +263,6 @@ public class LockscreenCamera extends XposedModule {
         }
 
         // 7. プレビュー画像の絞り込み（写真保存のトラッキング）
-        
-        // --- insert フック ---
         try {
             hook(ContentResolver.class.getDeclaredMethod("insert", Uri.class, ContentValues.class))
                 .intercept(chain -> {
@@ -286,7 +278,6 @@ public class LockscreenCamera extends XposedModule {
                 });
         } catch (Throwable ignored) {}
 
-        // --- update フック ---
         try {
             hook(ContentResolver.class.getDeclaredMethod("update", Uri.class, ContentValues.class, String.class, String[].class))
                 .intercept(chain -> {
@@ -317,13 +308,12 @@ public class LockscreenCamera extends XposedModule {
 
     // --- ヘルパーメソッド群 ---
 
-    // パッケージ名がカメラ系かどうかを判定する（GCam 対応）
     private boolean isCameraPackage(String pkg) {
         if (pkg == null) return false;
         return pkg.equals("com.android.camera") || 
                pkg.contains("GoogleCamera") || 
                pkg.equals("org.codeaurora.snapcam") || 
-               pkg.contains("camera"); // 汎用的な判定
+               pkg.contains("camera");
     }
 
     private boolean isCameraActivity(Activity act) {
@@ -347,7 +337,6 @@ public class LockscreenCamera extends XposedModule {
         return v.getClass().getName().endsWith("DecorView");
     }
 
-    //ギャラリー起動インテントをモジュール内の SecureViewerActivity へ強制リダイレクト
     private void handleGalleryRedirect(Context ctx, Intent intent) {
         if (ctx == null || intent == null || intent.getAction() == null) return;
 
@@ -363,21 +352,17 @@ public class LockscreenCamera extends XposedModule {
                             Intent.ACTION_PICK.equals(action) ||
                             action.contains("REVIEW");
 
-        // プレビューボタンが押された場合のみ処理
         if (isGallery && intent.getData() != null) {
             Log.i(TAG, "Redirecting to SecureViewer (Session Photos)");
 
-            // セッション内の全画像リストを作成
             ArrayList<Uri> uriList = new ArrayList<>();
             if (!SessionManager.SESSION_URIS.isEmpty()) {
                 uriList.addAll(SessionManager.SESSION_URIS);
             }
-            // 万が一リストが空でも、タップされた画像は必ず表示する
             if (uriList.isEmpty() && intent.getData() != null) {
                 uriList.add(intent.getData());
             }
 
-            // 宛先を自前ビューアに差し替え
             intent.setComponent(new ComponentName(
                     "com.github.droserasprout.lockscreencamera",
                     "com.github.droserasprout.lockscreencamera.SecureViewerActivity"
@@ -387,7 +372,6 @@ public class LockscreenCamera extends XposedModule {
                 intent.setSelector(null);
             }
 
-            // ClipData による権限付与（全 URI に読み取り権限を渡す）
             if (!uriList.isEmpty()) {
                 ClipData clipData = new ClipData(
                         "session_photos", 
@@ -400,11 +384,9 @@ public class LockscreenCamera extends XposedModule {
                 intent.setClipData(clipData);
             }
 
-            // リストを Intent Extra にも残す
             intent.putParcelableArrayListExtra("session_photos_list", uriList);
             Log.i(TAG, "Passed " + uriList.size() + " photos to viewer");
 
-            // 権限・表示フラグ
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
                             WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
                             Intent.FLAG_ACTIVITY_NEW_TASK |
@@ -427,45 +409,19 @@ public class LockscreenCamera extends XposedModule {
                     KeyguardManager km = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
                     boolean isLocked = (km != null && km.isKeyguardLocked());
 
-                    // デフォルトのカメラアプリを動的に特定する
-                    Intent cameraIntent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
-                    PackageManager pm = context.getPackageManager();
-                    ResolveInfo info = pm.resolveActivity(cameraIntent, PackageManager.MATCH_DEFAULT_ONLY);
-                    
-                    String pkg = "com.android.camera"; // Fallback
-                    String cls = "com.android.camera.Camera"; // Fallback
-
-                    if (info != null) {
-                        pkg = info.activityInfo.packageName;
-                        cls = info.activityInfo.name;
-                        Log.i(TAG, "Resolved default camera: " + pkg + "/" + cls);
-                    } else {
-                        // SECURE が見つからない場合は通常アクションで再試行
-                        cameraIntent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA);
-                        info = pm.resolveActivity(cameraIntent, PackageManager.MATCH_DEFAULT_ONLY);
-                        if (info != null) {
-                            pkg = info.activityInfo.packageName;
-                            cls = info.activityInfo.name;
-                        }
-                    }
-
-                    String action = isLocked ? MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE 
-                                             : MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA;
-
-                    Intent intent = new Intent(action);
-                    // 特定したパッケージとクラスを使用
-                    intent.setComponent(new ComponentName(pkg, cls));
+                    // OS のデフォルトカメラ選択を尊重する
+                    Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA);
 
                     int flags = 0x00040000 | Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP;
 
                     if (isLocked) {
                         flags |= Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS;
-                        intent.putExtra("is_secure_camera", true);
-                        intent.putExtra("com.miui.camera.extra.IS_SECURE_CAMERA", true);
+                        // ロック画面からの起動であることをフラグで伝える（フック用）
                         intent.putExtra("com.miui.camera.extra.START_BY_KEYGUARD", true);
                         intent.putExtra("StartActivityWhenLocked", true);
+                        intent.putExtra("is_secure_camera", true);
                     } else {
-                        intent.putExtra("com.miui.camera.extra.START_BY_KEYGUARD", true);
+                        intent.putExtra("com.miui.camera.extra.START_BY_KEYGUARD", false);
                         intent.putExtra("StartActivityWhenLocked", false);
                     }
 
@@ -477,6 +433,8 @@ public class LockscreenCamera extends XposedModule {
                     if (Build.VERSION.SDK_INT >= 34) {
                         options.setPendingIntentBackgroundActivityStartMode(2);
                     }
+
+                    SessionManager.start(); // セッション開始
 
                     context.startActivity(intent, options.toBundle());
                     return true;
