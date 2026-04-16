@@ -532,6 +532,11 @@ public class LockscreenCamera extends XposedModule {
                 window.setAttributes(lp);
                 window.addFlags(lp.flags);
 
+                window.setFlags(
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+                );
+
                 View decorView = window.getDecorView();
                 if (decorView != null) {
                     decorView.setAlpha(1.0f);
