@@ -73,9 +73,16 @@ public class LockscreenCamera extends XposedModule {
             Log.i(TAG, "Secure Camera Session Cleared");
         }
 
+        // 【修正】重複チェックとログ追加
         public static void add(Uri uri) {
             if (isActive && uri != null) {
-                SESSION_URIS.add(uri);
+                // 重複した URI は追加しない
+                if (!SESSION_URIS.contains(uri)) {
+                    SESSION_URIS.add(uri);
+                    Log.d(TAG, "Added to Session: " + uri + " | Total: " + SESSION_URIS.size());
+                } else {
+                    Log.d(TAG, "Duplicate URI skipped: " + uri);
+                }
             }
         }
     }
@@ -110,7 +117,7 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 1. Keyguard の解除要求 (PIN 画面表示を完全にブロック)
+        // 1. Keyguard の解除要求（PIN 画面表示）を完全にブロック
         try {
             Method dismissMethod = KeyguardManager.class.getDeclaredMethod(
                     "requestDismissKeyguard", Activity.class, KeyguardManager.KeyguardDismissCallback.class);
@@ -222,7 +229,7 @@ public class LockscreenCamera extends XposedModule {
                                 boolean isSecureAction = intent != null && MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE.equals(intent.getAction());
                                 boolean isLockscreenLaunch = intent != null && intent.getBooleanExtra("com.miui.camera.extra.START_BY_KEYGUARD", false);
 
-                                // 【重要】カメラアプリプロセス内でセッションを開始
+                                // カメラアプリプロセス内でセッションを開始
                                 if (isLockscreenLaunch && isSecureAction) {
                                     SessionManager.start(); // <--- ここで初期化
                                     log(Log.INFO, TAG, "Secure Lockscreen launch detected. Session Started.");
@@ -264,11 +271,27 @@ public class LockscreenCamera extends XposedModule {
                 .intercept(chain -> {
                     if (SessionManager.isActive) {
                         Uri uri = (Uri) chain.getArgs().get(0);
-                        // フィルタを緩めて /DCIM/ や /Pictures/ も捕捉。null ならとりあえず追加
+                        // insert はプレースホルダの可能性があるので、とりあえずログに出すだけにして
+                        // 実データが確定する update をメインにする、あるいは insert 結果の URI を使う
+                        Uri returnedUri = (Uri) chain.proceed();
+                        if (returnedUri != null) {
+                            SessionManager.add(returnedUri);
+                        }
+                        return returnedUri;
+                    }
+                    return chain.proceed();
+                });
+        } catch (Throwable ignored) {}
+
+        // --- update フック ---
+        // カメラアプリがメタデータなどを更新する際に、最終的な URI が確定することがある
+        try {
+            hook(ContentResolver.class.getDeclaredMethod("update", Uri.class, ContentValues.class, String.class, String[].class))
+                .intercept(chain -> {
+                    if (SessionManager.isActive) {
+                        Uri uri = (Uri) chain.getArgs().get(0);
                         if (uri != null) {
-                            Uri returnedUri = (Uri) chain.proceed();
-                            SessionManager.add(returnedUri != null ? returnedUri : uri);
-                            return returnedUri;
+                            SessionManager.add(uri);
                         }
                     }
                     return chain.proceed();
@@ -311,16 +334,15 @@ public class LockscreenCamera extends XposedModule {
     /**
      * ギャラリー起動インテントをモジュール内の SecureViewerActivity へ強制リダイレクト
      */
-    // 【修正】Gallery Redirect メソッドを完全入れ替え
     private void handleGalleryRedirect(Context ctx, Intent intent) {
         if (ctx == null || intent == null || intent.getAction() == null) return;
-
-        // 🔒 ロック画面セッション中でなければ、一切リダイレクトしない（通常起動時の誤発動を防止）
-        if (!SessionManager.isActive) return;
 
         try {
             if (!"com.android.camera".equals(ctx.getPackageName())) return;
         } catch (Exception e) { return; }
+
+        // ロック画面セッション中でなければ、一切リダイレクトしない（通常起動時の誤発動を防止）
+        if (!SessionManager.isActive) return;
 
         String action = intent.getAction();
         boolean isGallery = Intent.ACTION_VIEW.equals(action) ||

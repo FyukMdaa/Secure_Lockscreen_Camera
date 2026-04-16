@@ -52,7 +52,6 @@ public class SecureViewerActivity extends Activity {
         // 2. データの受け取り（Intent から）
         List<Uri> uris = getIntent().getParcelableArrayListExtra("session_photos_list");
 
-        // フォールバック処理を簡潔に
         if (uris == null || uris.isEmpty()) {
             Uri singleUri = getIntent().getData();
             if (singleUri != null) {
@@ -68,24 +67,30 @@ public class SecureViewerActivity extends Activity {
             return;
         }
 
-        // 3. UIの構築 (ViewPager2)
+        // 3. UI の構築 (ViewPager2)
         viewPager = new ViewPager2(this);
         viewPager.setLayoutParams(new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
         viewPager.setBackgroundColor(0xFF000000);
+        
+        // 【追加】隣のページをプリロードし、スワイプの遅延を防ぐ
+        viewPager.setOffscreenPageLimit(1);
 
         // 下スワイプで閉じるためのラップレイアウトを作成
         SwipeDismissLayout container = new SwipeDismissLayout(this);
         container.addView(viewPager);
         setContentView(container);
 
-        // Adapterのセット
+        // Adapter のセット
         adapter = new PhotoAdapter(uris);
         viewPager.setAdapter(adapter);
+        // 最新画像 (リストの最後) に移動
         viewPager.setCurrentItem(uris.size() - 1, false);
 
-        // 4. 画面OFFで自動終了
+        Toast.makeText(this, "下にスワイプで終了 | ピンチでズーム", Toast.LENGTH_SHORT).show();
+
+        // 4. 画面 OFF で自動終了
         screenOffReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) { finish(); }
         };
@@ -97,7 +102,7 @@ public class SecureViewerActivity extends Activity {
         }
     }
 
-    // OOM対策: 画面サイズに合わせて画像を縮小して読み込む
+    // OOM 対策：画面サイズに合わせて画像を縮小して読み込む
     private Bitmap decodeSampledBitmapFromUri(Uri uri, int reqWidth, int reqHeight) {
         try {
             // 1. 画像のサイズだけ読み込む
@@ -155,7 +160,6 @@ public class SecureViewerActivity extends Activity {
 
         public SwipeDismissLayout(Context context) {
             super(context);
-            // 画面の高さの20%を「閉じる」の閾値にする
             swipeThreshold = getResources().getDisplayMetrics().heightPixels * 0.2f;
         }
 
@@ -171,11 +175,9 @@ public class SecureViewerActivity extends Activity {
                     float dy = ev.getY() - initialY;
                     float dx = Math.abs(ev.getX() - initialX);
 
-                    // 下方向(Yがプラス)に指が動き、横方向より縦方向の移動が大きい場合
                     if (dy > 50 && dy > dx) {
                         isSwiping = true;
-                        // ViewPager2の横スクロールを無効化し、縦イベントを奪う
-                        return true; 
+                        return true;
                     }
                     break;
             }
@@ -189,11 +191,9 @@ public class SecureViewerActivity extends Activity {
             switch (ev.getActionMasked()) {
                 case MotionEvent.ACTION_MOVE:
                     float dy = ev.getY() - initialY;
-                    // 上には戻さない（指を上に動かしても0止まり）
                     float translationY = Math.max(0, dy);
                     float progress = translationY / getHeight();
 
-                    // ViewPager2を指に追従して動かす ＆ 少しずつ透明にする
                     viewPager.setTranslationY(translationY);
                     viewPager.setAlpha(1.0f - (progress * 0.8f));
                     break;
@@ -201,11 +201,9 @@ public class SecureViewerActivity extends Activity {
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
                     if (viewPager.getTranslationY() > swipeThreshold) {
-                        // 閾値を超えたらそのままフェードアウトして終了
                         viewPager.setAlpha(0f);
                         finish();
                     } else {
-                        // 閾値を超えなければバネのように元の位置に戻す
                         viewPager.animate()
                                 .translationY(0)
                                 .alpha(1.0f)
