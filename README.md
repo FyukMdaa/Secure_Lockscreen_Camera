@@ -10,7 +10,7 @@ Xposed Framework module to skip authentication on "Quickly open camera" gesture.
 * Migrated to [libxposed API 101](https://github.com/libxposed/api)
 * Added support for MIUI Camera (`com.android.camera`) on custom ROMs
 * Fixed `ActivityBase.checkKeyguard` being called after lockscreen hooks, which caused the camera to dismiss immediately
-* Built with AI assistance (Claude and z.ai)
+* Built with AI assistance (Claude, z.ai, Gemini and Qwen)
 
 ## Requirements
 
@@ -40,4 +40,3 @@ Xposed Framework module to skip authentication on "Quickly open camera" gesture.
 
 ### Projects
 * [droserasprout/lockscreencamera](https://github.com/droserasprout/lockscreencamera) - original module
-* [Xposed-Modules-Repo/nil.nadph.qnotified](https://github.com/Xposed-Modules-Repo/nil.nadph.qnoticed)
