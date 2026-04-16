@@ -3,9 +3,11 @@ package com.github.droserasprout.lockscreencamera;
 import android.app.Activity;
 import android.app.ActivityOptions;
 import android.app.KeyguardManager;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.PixelFormat;
 import android.net.Uri;
 import android.os.Build;
@@ -34,6 +36,8 @@ public class LockscreenCamera extends XposedModule {
     private static final String TAG = "LockscreenCamera";
     // フィールド検索用キャッシュ
     private static final Map<String, Field> fieldCache = new ConcurrentHashMap<>();
+    // 画面オフによる自動終了を許可するフラグ
+    private static volatile boolean sAllowAutoFinish = false;
 
     // 書き換え対象の内部フィールド名リスト
     private static final String[] TARGET_BOOLEAN_FIELDS = {
@@ -44,17 +48,17 @@ public class LockscreenCamera extends XposedModule {
         "mUserAuthenticationFlag", "mIgnoreKeyguardCheck",
         "mIsCameraApp", "mPrivacyAuthorized", "mIsForeground"
     };
-
     public LockscreenCamera() {
         super();
     }
+
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
         if (!param.getPackageName().equals("com.android.camera")) {
             return;
         }
 
-        log(Log.INFO, TAG, "Targeting com.android.camera (DecorView / Z-Order Force)");
+        log(Log.INFO, TAG, "Targeting com.android.camera (Auto-Finish Integration)");
 
         // 0. DecorView の透明化・非表示化を物理的に阻止
         try {
@@ -63,9 +67,7 @@ public class LockscreenCamera extends XposedModule {
                 if (isDecorView(view) && isCameraContext(view.getContext())) {
                     List<Object> args = chain.getArgs();
                     float alpha = (float) args.get(0);
-                    if (alpha < 1.0f) {
-                        args.set(0, 1.0f);
-                    }
+                    if (alpha < 1.0f) args.set(0, 1.0f);
                 }
                 return chain.proceed();
             });
@@ -74,9 +76,7 @@ public class LockscreenCamera extends XposedModule {
                 if (isDecorView(view) && isCameraContext(view.getContext())) {
                     List<Object> args = chain.getArgs();
                     int vis = (int) args.get(0);
-                    if (vis != View.VISIBLE) {
-                        args.set(0, View.VISIBLE);
-                    }
+                    if (vis != View.VISIBLE) args.set(0, View.VISIBLE);
                 }
                 return chain.proceed();
             });
@@ -103,19 +103,24 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 3. Aggressive Finish Blocking
+        // 3. Aggressive Finish Blocking with Auto-Finish Bypass
         try {
             hook(Activity.class.getDeclaredMethod("finish")).intercept(chain -> {
                 if (isCameraActivity((Activity) chain.getThisObject())) {
-                    log(Log.WARN, TAG, "BLOCKED finish() to prevent NativeWindow death.");
-                    return null;
+                    if (!sAllowAutoFinish) {
+                        log(Log.WARN, TAG, "BLOCKED finish() to prevent NativeWindow death.");
+                        return null;
+                    }
+                    log(Log.INFO, TAG, "ALLOWING finish() (Auto-finish triggered by screen off)");
                 }
                 return chain.proceed();
             });
             hook(Activity.class.getDeclaredMethod("finishAfterTransition")).intercept(chain -> {
                 if (isCameraActivity((Activity) chain.getThisObject())) {
-                    log(Log.WARN, TAG, "BLOCKED finishAfterTransition().");
-                    return null;
+                    if (!sAllowAutoFinish) {
+                        log(Log.WARN, TAG, "BLOCKED finishAfterTransition().");
+                        return null;
+                    }
                 }
                 return chain.proceed();
             });
@@ -140,11 +145,11 @@ public class LockscreenCamera extends XposedModule {
                         intent.putExtra("is_secure_camera", true);
                         intent.putExtra("ShowCameraWhenLocked", true);
                         intent.putExtra("StartFromKeyguard", true);
-                    }
-                }
+                    }                }
                 return intent;
             });
         } catch (Throwable ignored) {}
+
         // 6. SurfaceView/View 非表示化を阻止
         try {
             hook(View.class.getMethod("setVisibility", int.class)).intercept(chain -> {
@@ -152,15 +157,13 @@ public class LockscreenCamera extends XposedModule {
                 if (isCameraContext(v.getContext()) && !isDecorView(v)) {
                     List<Object> args = chain.getArgs();
                     int vis = (int) args.get(0);
-                    if (vis != View.VISIBLE) {
-                        args.set(0, View.VISIBLE);
-                    }
+                    if (vis != View.VISIBLE) args.set(0, View.VISIBLE);
                 }
                 return chain.proceed();
             });
         } catch (Throwable ignored) {}
 
-        // 7. ライフサイクルフック
+        // 7. ライフサイクルフック（+ Auto-Finish 登録ロジック）
         String[] criticalMethods = {"attachBaseContext", "onCreate", "onStart", "onResume", "onWindowFocusChanged"};
         for (String mname : criticalMethods) {
             try {
@@ -190,11 +193,47 @@ public class LockscreenCamera extends XposedModule {
                             
                             if ("onCreate".equals(methodName)) {
                                 Object res = chain.proceed();
+                                
+                                // ロック画面からの起動時のみ、画面オフで自動終了するレシーバーを登録                                try {
+                                    sAllowAutoFinish = false; // 初期化
+                                    KeyguardManager km = (KeyguardManager) act.getSystemService(Context.KEYGUARD_SERVICE);
+                                    boolean startedLocked = km != null && km.isKeyguardLocked();
+                                    
+                                    if (startedLocked) {
+                                        log(Log.INFO, TAG, "Lockscreen launch detected. Registering screen-off auto-finish.");
+                                        IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_OFF);
+                                        BroadcastReceiver screenOffReceiver = new BroadcastReceiver() {
+                                            @Override
+                                            public void onReceive(Context context, Intent intent) {
+                                                try {
+                                                    KeyguardManager currentKm = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
+                                                    // 画面オフ時点でもまだロック状態なら終了許可
+                                                    if (currentKm != null && currentKm.isKeyguardLocked()) {
+                                                        log(Log.INFO, TAG, "Screen off on lockscreen. Enabling auto-finish.");
+                                                        sAllowAutoFinish = true;
+                                                        act.finish(); // フックを通過して正常終了
+                                                    }
+                                                } catch (Exception e) {}
+                                            }
+                                        };
+                                        
+                                        // Android 14+ での登録クラッシュ回避
+                                        if (Build.VERSION.SDK_INT >= 34) {
+                                            act.registerReceiver(screenOffReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+                                        } else {
+                                            act.registerReceiver(screenOffReceiver, filter);
+                                        }
+                                    }
+                                } catch (Exception e) {
+                                    log(Log.WARN, TAG, "Failed to register auto-finish receiver", e);
+                                }
+
                                 applyWindowAndBufferFixes(act);
                                 return res;
                             }
                             applyWindowAndBufferFixes(act);
-                        }                    }
+                        }
+                    }
                     return chain.proceed();
                 });
             } catch (Throwable ignored) {}
@@ -204,8 +243,7 @@ public class LockscreenCamera extends XposedModule {
         try {
             Class<?> callbackClass = Class.forName("android.hardware.camera2.CameraManager$AvailabilityCallback", true, param.getClassLoader());
             hook(callbackClass.getDeclaredMethod("onCameraUnavailable", String.class)).intercept(chain -> {
-                log(Log.INFO, TAG, "Blocked onCameraUnavailable for ID: " + ((List<?>) chain.getArgs()).get(0));
-                return null;
+                log(Log.INFO, TAG, "Blocked onCameraUnavailable for ID: " + ((List<?>) chain.getArgs()).get(0));                return null;
             });
         } catch (Throwable ignored) {}
 
@@ -226,12 +264,8 @@ public class LockscreenCamera extends XposedModule {
     }
 
     private boolean isCameraActivity(Activity act) {
-        try {
-            return act != null && "com.android.camera".equals(act.getPackageName());
-        } catch (Exception e) {
-            try { return act.getClass().getName().startsWith("com.android.camera"); } 
-            catch (Exception e2) { return false; }
-        }
+        try { return act != null && "com.android.camera".equals(act.getPackageName()); } 
+        catch (Exception e) { try { return act.getClass().getName().startsWith("com.android.camera"); } catch (Exception e2) { return false; } }
     }
 
     private boolean isCameraContext(Context ctx) {
@@ -244,6 +278,7 @@ public class LockscreenCamera extends XposedModule {
         if (v == null) return false;
         return v.getClass().getName().endsWith("DecorView");
     }
+
     @Override
     public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
         try {
@@ -255,17 +290,9 @@ public class LockscreenCamera extends XposedModule {
                     Method getContextMethod = chain.getThisObject().getClass().getMethod("getContext");
                     Context context = (Context) getContextMethod.invoke(chain.getThisObject());
 
-                    // 【修正】ResolverActivity 回避のため、コンポーネントを明示的に指定
                     Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
-                    
-                    intent.setComponent(new android.content.ComponentName(
-                            "com.android.camera", 
-                            "com.android.camera.Camera"));
-                    
-                    // 0x00040000 is FLAG_ACTIVITY_SHOW_WHEN_LOCKED
-                    int flags = 0x00040000 | Intent.FLAG_ACTIVITY_NEW_TASK 
-                              | Intent.FLAG_ACTIVITY_CLEAR_TOP 
-                              | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS;
+                    intent.setComponent(new android.content.ComponentName("com.android.camera", "com.android.camera.Camera"));
+                                        int flags = 0x00040000 | Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS;
                     intent.addFlags(flags);
 
                     intent.putExtra("is_secure_camera", true);
@@ -274,10 +301,8 @@ public class LockscreenCamera extends XposedModule {
                     intent.putExtra("StartActivityWhenLocked", true);
                     intent.putExtra("com.android.systemui.camera_launch_source", "lockscreen_affordance");
 
-                    // Android 14+ でのバックグラウンド起動制限の解除
                     ActivityOptions options = ActivityOptions.makeBasic();
                     if (Build.VERSION.SDK_INT >= 34) {
-                        // 2 is MODE_BACKGROUND_ACTIVITY_START_ALLOWED
                         options.setPendingIntentBackgroundActivityStartMode(2);
                     }
                     
@@ -292,6 +317,7 @@ public class LockscreenCamera extends XposedModule {
             log(Log.WARN, TAG, "System hook skipped", t);
         }
     }
+
     private void applyWindowAndBufferFixes(Activity activity) {
         try {
             activity.setShowWhenLocked(true);
@@ -315,8 +341,7 @@ public class LockscreenCamera extends XposedModule {
                 lp.flags &= ~WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD;
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-                }
+                    lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;                }
                 window.setAttributes(lp);
                 window.addFlags(lp.flags);
 
@@ -341,7 +366,8 @@ public class LockscreenCamera extends XposedModule {
         }
     }
 
-    private void setFieldFast(Object obj, String fieldName, Object value) {        try {
+    private void setFieldFast(Object obj, String fieldName, Object value) {
+        try {
             Class<?> current = obj.getClass();
             String cacheKey = current.getName() + ":" + fieldName;
             Field f = fieldCache.get(cacheKey);
@@ -359,9 +385,7 @@ public class LockscreenCamera extends XposedModule {
                 fieldCache.put(cacheKey, f);
             }
 
-            if (f != null) {
-                f.set(obj, value);
-            }
+            if (f != null) f.set(obj, value);
         } catch (Throwable ignored) {}
     }
 }
