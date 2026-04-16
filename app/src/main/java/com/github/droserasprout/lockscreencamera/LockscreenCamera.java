@@ -58,7 +58,7 @@ public class LockscreenCamera extends XposedModule {
             return;
         }
 
-        log(Log.INFO, TAG, "Targeting com.android.camera (Secure Viewer Redirect)");
+        log(Log.INFO, TAG, "Targeting com.android.camera (Secure Gallery Bypass)");
 
         // 0. DecorView の透明化・非表示化を物理的に阻止
         try {
@@ -135,14 +135,14 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 5. Secure Viewer Redirect (ギャラリー起動の横取りとリダイレクト)
-        // 外部ギャラリーへの遷移をカメラアプリ自身へリダイレクトし、外部アプリ依存を排除する
+        // 5. Secure Gallery Bypass (内蔵ビューアへのリダイレクト)
+        // 外部ギャラリーへの遷移をブロックし、カメラアプリ自身へリダイレクトして「撮ったものだけ」を表示させる
         try {
             hook(Activity.class.getDeclaredMethod("startActivity", Intent.class)).intercept(chain -> {
                 Activity caller = (Activity) chain.getThisObject();
                 Intent outIntent = (Intent) chain.getArgs().get(0);
 
-                // セキュアセッション中 かつ 外部アプリへの遷移を試みている場合
+                // セキュアセッション中 かつ ギャラリー関連のアクションか確認
                 if (isCameraActivity(caller) && isSecureSession(caller) && outIntent != null) {
                     String action = outIntent.getAction();
                     boolean isGalleryIntent = Intent.ACTION_VIEW.equals(action) || 
@@ -151,14 +151,11 @@ public class LockscreenCamera extends XposedModule {
                     
                     // 外部パッケージが指定されている場合（＝外部アプリへ渡そうとしている）
                     if (isGalleryIntent && outIntent.getPackage() != null && !outIntent.getPackage().equals("com.android.camera")) {
-                        log(Log.INFO, TAG, "Intercepting external gallery launch -> Redirecting to Camera App");
+                        log(Log.INFO, TAG, "Redirecting Gallery intent to Internal Camera Activity");
                         
                         // カメラアプリ自身（内蔵ビューアまたはメインActivity）へリダイレクト
                         outIntent.setComponent(new ComponentName("com.android.camera", "com.android.camera.Camera"));
                         outIntent.setPackage(null); // パッケージ指定をクリア
-                        
-                        // 既存タスクへの復帰、または新しいタスクとして開く
-                        outIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
                         
                         // ロック画面上での表示を強制
                         outIntent.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
@@ -166,6 +163,10 @@ public class LockscreenCamera extends XposedModule {
                         
                         // URIアクセス権の付与（写真データを見るために必要）
                         outIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        
+                        // カメラ側に「これはプレビュー要求だ」と伝えるためのフラグ
+                        outIntent.putExtra("from_gallery", true);
+                        outIntent.putExtra("is_secure_camera", true);
                     }
                 }
                 return chain.proceed();
