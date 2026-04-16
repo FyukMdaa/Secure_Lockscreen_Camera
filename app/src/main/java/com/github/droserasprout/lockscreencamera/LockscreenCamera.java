@@ -56,7 +56,7 @@ public class LockscreenCamera extends XposedModule {
 
         log(Log.INFO, TAG, "Targeting com.android.camera (DecorView / Z-Order Force)");
 
-        // 0. 【新規】DecorView の透明化・非表示化を物理的に阻止
+        // 0. DecorView の透明化・非表示化を物理的に阻止
         try {
             hook(View.class.getDeclaredMethod("setAlpha", float.class)).intercept(chain -> {
                 View view = (View) chain.getThisObject();
@@ -64,7 +64,6 @@ public class LockscreenCamera extends XposedModule {
                     List<Object> args = chain.getArgs();
                     float alpha = (float) args.get(0);
                     if (alpha < 1.0f) {
-                        log(Log.DEBUG, TAG, "Prevented DecorView from becoming transparent (Force 1.0f)");
                         args.set(0, 1.0f);
                     }
                 }
@@ -76,7 +75,6 @@ public class LockscreenCamera extends XposedModule {
                     List<Object> args = chain.getArgs();
                     int vis = (int) args.get(0);
                     if (vis != View.VISIBLE) {
-                        log(Log.DEBUG, TAG, "Prevented DecorView from being hidden (Force VISIBLE)");
                         args.set(0, View.VISIBLE);
                     }
                 }
@@ -96,9 +94,9 @@ public class LockscreenCamera extends XposedModule {
 
         // 2. Activity Visibility Spoofing
         try {
-            hook(Activity.class.getDeclaredMethod("hasWindowFocus")).intercept(chain -> {                if (isCameraActivity((Activity) chain.getThisObject())) return true;
-                return (Boolean) chain.proceed();
-            });
+            hook(Activity.class.getDeclaredMethod("hasWindowFocus")).intercept(chain -> {
+                if (isCameraActivity((Activity) chain.getThisObject())) return true;
+                return (Boolean) chain.proceed();            });
             hook(Activity.class.getDeclaredMethod("isResumed")).intercept(chain -> {
                 if (isCameraActivity((Activity) chain.getThisObject())) return true;
                 return (Boolean) chain.proceed();
@@ -145,8 +143,8 @@ public class LockscreenCamera extends XposedModule {
                     }
                 }
                 return intent;
-            });        } catch (Throwable ignored) {}
-
+            });
+        } catch (Throwable ignored) {}
         // 6. SurfaceView/View 非表示化を阻止
         try {
             hook(View.class.getMethod("setVisibility", int.class)).intercept(chain -> {
@@ -194,9 +192,9 @@ public class LockscreenCamera extends XposedModule {
                                 Object res = chain.proceed();
                                 applyWindowAndBufferFixes(act);
                                 return res;
-                            }                            applyWindowAndBufferFixes(act);
-                        }
-                    }
+                            }
+                            applyWindowAndBufferFixes(act);
+                        }                    }
                     return chain.proceed();
                 });
             } catch (Throwable ignored) {}
@@ -243,9 +241,9 @@ public class LockscreenCamera extends XposedModule {
     }
 
     private boolean isDecorView(View v) {
-        if (v == null) return false;        return v.getClass().getName().endsWith("DecorView");
+        if (v == null) return false;
+        return v.getClass().getName().endsWith("DecorView");
     }
-
     @Override
     public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
         try {
@@ -257,25 +255,31 @@ public class LockscreenCamera extends XposedModule {
                     Method getContextMethod = chain.getThisObject().getClass().getMethod("getContext");
                     Context context = (Context) getContextMethod.invoke(chain.getThisObject());
 
+                    // 【修正】ResolverActivity 回避のため、コンポーネントを明示的に指定
                     Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE);
-                    intent.setPackage("com.android.camera");
+                    
+                    intent.setComponent(new android.content.ComponentName(
+                            "com.android.camera", 
+                            "com.android.camera.Camera"));
                     
                     // 0x00040000 is FLAG_ACTIVITY_SHOW_WHEN_LOCKED
-                    intent.addFlags(0x00040000 | Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                    
+                    int flags = 0x00040000 | Intent.FLAG_ACTIVITY_NEW_TASK 
+                              | Intent.FLAG_ACTIVITY_CLEAR_TOP 
+                              | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS;
+                    intent.addFlags(flags);
+
                     intent.putExtra("is_secure_camera", true);
                     intent.putExtra("com.miui.camera.extra.IS_SECURE_CAMERA", true);
                     intent.putExtra("android.intent.extra.CAMERA_OPEN_ONLY", true);
                     intent.putExtra("StartActivityWhenLocked", true);
                     intent.putExtra("com.android.systemui.camera_launch_source", "lockscreen_affordance");
 
-                    // 【重要】ActivityOptions によるバックグラウンド起動制限の解除
+                    // Android 14+ でのバックグラウンド起動制限の解除
                     ActivityOptions options = ActivityOptions.makeBasic();
-                    if (Build.VERSION.SDK_INT >= 34) { // Android 14+
+                    if (Build.VERSION.SDK_INT >= 34) {
                         // 2 is MODE_BACKGROUND_ACTIVITY_START_ALLOWED
                         options.setPendingIntentBackgroundActivityStartMode(2);
                     }
-                    // 【修正】setCustomAnimations は存在しないため削除しました
                     
                     context.startActivity(intent, options.toBundle());
                     return true;
@@ -288,11 +292,11 @@ public class LockscreenCamera extends XposedModule {
             log(Log.WARN, TAG, "System hook skipped", t);
         }
     }
-
     private void applyWindowAndBufferFixes(Activity activity) {
         try {
             activity.setShowWhenLocked(true);
-            activity.setTurnScreenOn(true);            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            activity.setTurnScreenOn(true);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                 activity.setInheritShowWhenLocked(true);
             }
 
@@ -337,11 +341,11 @@ public class LockscreenCamera extends XposedModule {
         }
     }
 
-    private void setFieldFast(Object obj, String fieldName, Object value) {
-        try {
+    private void setFieldFast(Object obj, String fieldName, Object value) {        try {
             Class<?> current = obj.getClass();
             String cacheKey = current.getName() + ":" + fieldName;
             Field f = fieldCache.get(cacheKey);
+
             if (f == null && !fieldCache.containsKey(cacheKey)) {
                 while (current != null && !current.getName().equals("android.app.Activity")) {
                     try {
