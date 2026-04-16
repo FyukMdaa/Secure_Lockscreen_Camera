@@ -276,19 +276,28 @@ public class LockscreenCamera extends XposedModule {
 
         // 7. プレビュー画像の絞り込み（写真保存のトラッキング）
         try {
-            hook(ContentResolver.class.getDeclaredMethod("insert", Uri.class, ContentValues.class))
-                .intercept(chain -> {
-                    if (SessionManager.isActive) {
-                        Uri uri = (Uri) chain.getArgs().get(0);
-                        Uri returnedUri = (Uri) chain.proceed();
-                        if (returnedUri != null) {
-                            SessionManager.add(returnedUri);
-                        }
-                        return returnedUri;
-                    }
-                    return chain.proceed();
-                });
-        } catch (Throwable ignored) {}
+              hook(ContentResolver.class.getDeclaredMethod("update", Uri.class, ContentValues.class, String.class, String[].class))
+                  .intercept(chain -> {
+                      if (SessionManager.isActive) {
+                          Uri uri = (Uri) chain.getArgs().get(0);
+                          ContentValues values = (ContentValues) chain.getArgs().get(1);
+
+                          if (uri != null && values != null) {
+                              boolean isFinished = false;
+                              if (Build.VERSION.SDK_INT >= 29 && values.containsKey(MediaStore.MediaColumns.IS_PENDING)) {
+                                  isFinished = (Integer) values.get(MediaStore.MediaColumns.IS_PENDING) == 0;
+                              } else if (values.containsKey(MediaStore.Images.Media.DATA)) {
+                                  isFinished = true;
+                              }
+
+                              if (isFinished) {
+                                  SessionManager.add(uri);
+                              }
+                          }
+                      }
+                      return chain.proceed();
+                  });
+          } catch (Throwable ignored) {}
 
         hook(ContentResolver.class.getDeclaredMethod("update", Uri.class, ContentValues.class, String.class, String[].class))
             .intercept(chain -> {
