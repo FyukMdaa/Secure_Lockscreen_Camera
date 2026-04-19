@@ -17,7 +17,6 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.MediaStore;
 import android.util.Log;
-import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
 import android.content.ContentResolver;
@@ -89,10 +88,11 @@ public class LockscreenCamera extends XposedModule {
 
         log(Log.INFO, TAG, "Targeting Camera App: " + pkg);
 
-        // setVisibility や setAlpha の操作は、Android 15 環境で Surface 生成を阻害し、
-        // 描画消失（Surface destroyed）を引き起こすため、一旦すべて削除します。
+        // View フックの完全削除
+        // setVisibility や setAlpha のフックは、Android 15/Xiaomi 環境で Surface 生成を阻害し、
+        // 描画消失（Surface destroyed）を引き起こすため、全て削除します。
 
-        // 1. Keyguard 解除要求ブロック
+        // 1. Keyguard 解除要求ブロック（PIN 画面が出ないようにする）
         try {
             Method dismissMethod = KeyguardManager.class.getDeclaredMethod(
                     "requestDismissKeyguard", Activity.class, KeyguardManager.KeyguardDismissCallback.class);
@@ -306,15 +306,16 @@ public class LockscreenCamera extends XposedModule {
                     KeyguardManager km = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
                     boolean isLocked = (km != null && km.isKeyguardLocked());
 
-                    Intent intent = new Intent(isLocked ? MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE 
-                                                        : MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA);
+                    // 文字列指定で直接インテントを生成し、曖昧さを排除
+                    Intent intent = new Intent("android.media.action.STILL_IMAGE_CAMERA_SECURE");
                     PackageManager pm = context.getPackageManager();
                     ResolveInfo info = pm.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY);
                     if (info != null && !info.activityInfo.name.contains("Resolver")) {
                         intent.setComponent(new ComponentName(info.activityInfo.packageName, info.activityInfo.name));
                     }
 
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                    // NO_ANIMATION を追加して UI 遷移による描画の途切れを防ぐ
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NO_ANIMATION);
                     if (isLocked) {
                         intent.putExtra("com.miui.camera.extra.START_BY_KEYGUARD", true);
                         intent.putExtra("is_secure_camera", true);
@@ -333,29 +334,14 @@ public class LockscreenCamera extends XposedModule {
     }
 
     /**
-     * OS の Secure Camera 挙動を最大限尊重するため、Window パラメータの操作を最小限にします。
-     * setFormat や addFlags は Surface 破棄の原因となるため削除しました。
+     * OS の描画パイプラインを尊重するため、Window パラメータの操作を徹底的に最小化します。
      */
     private void applyWindowAndBufferFixes(Activity activity) {
         try {
-            // 基本のロック画面表示設定
+            // これらは Activity クラスのメソッドなので、WindowManager が拒否しにくい
             activity.setShowWhenLocked(true);
             activity.setTurnScreenOn(true);
             
-            // Window の操作を一旦全て削除
-            /*
-            Window window = activity.getWindow();
-            if (window != null) {
-                window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
-                window.setFormat(PixelFormat.OPAQUE);
-                
-                WindowManager.LayoutParams lp = window.getAttributes();
-                lp.flags |= WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
-                          | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                          | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
-                window.setAttributes(lp);
-            }
-            */
         } catch (Throwable ignored) {}
     }
 }
