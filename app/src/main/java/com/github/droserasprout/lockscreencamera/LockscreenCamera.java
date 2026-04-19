@@ -81,6 +81,7 @@ public class LockscreenCamera extends XposedModule {
         }
 
         public static void add(Uri uri) {
+            // isActive のチェックを Atomic に
             if (isActive.get() && uri != null && !SESSION_URIS.contains(uri)) {
                 SESSION_URIS.add(uri);
                 Log.d(TAG, "Added to Session: " + uri + " | Total: " + SESSION_URIS.size());
@@ -91,6 +92,7 @@ public class LockscreenCamera extends XposedModule {
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
         String pkg = param.getPackageName();
+        // LSPosed スコープに委ねるため、判定を緩やかに
         if (!isCameraPackage(pkg)) {
             return;
         }
@@ -105,10 +107,16 @@ public class LockscreenCamera extends XposedModule {
                     List<Object> args = chain.getArgs();
                     int vis = (int) args.get(0);
                     
+                    // DecorView の場合は常に VISIBLE を強制
                     if (isDecorView(view)) {
-                        if (vis != View.VISIBLE) args.set(0, View.VISIBLE);
+                        if (vis != View.VISIBLE) {
+                            args.set(0, View.VISIBLE);
+                        }
                     } else {
-                         if (vis != View.VISIBLE) args.set(0, View.VISIBLE);
+                        // 通常の View もカメラコンテキストなら VISIBLE を強制
+                         if (vis != View.VISIBLE) {
+                            args.set(0, View.VISIBLE);
+                        }
                     }
                 }
                 return chain.proceed();
@@ -232,10 +240,12 @@ public class LockscreenCamera extends XposedModule {
 
         // 6. ContentResolver フック（写真保存トラッキング）
         try {
+            // insert の戻り値を正しく URI として扱う
             hook(ContentResolver.class.getDeclaredMethod("insert", Uri.class, ContentValues.class))
                 .intercept(chain -> {
                     if (SessionManager.isActive.get()) {
                         Uri requestedUri = (Uri) chain.getArgs().get(0);
+                        // 保存された URIを取得
                         Object result = chain.proceed();
                         Uri finalUri = (result instanceof Uri) ? (Uri) result : requestedUri;
                         
@@ -254,6 +264,7 @@ public class LockscreenCamera extends XposedModule {
                         ContentValues values = (ContentValues) chain.getArgs().get(1);
 
                         if (uri != null && values != null) {
+                            // IS_PENDING チェック (Android 10+)
                             boolean isFinished = true;
                             if (Build.VERSION.SDK_INT >= 29 && values.containsKey(MediaStore.MediaColumns.IS_PENDING)) {
                                 isFinished = (Integer) values.get(MediaStore.MediaColumns.IS_PENDING) == 0;
@@ -281,6 +292,7 @@ public class LockscreenCamera extends XposedModule {
 
     // --- ヘルパーメソッド群 ---
 
+    // LSPosed のスコープ設定に依存し、広くカメラアプリを許可する
     private boolean isCameraPackage(String pkg) {
         if (pkg == null) return false;
         if (pkg.equals("com.android.camera") || pkg.equals("org.codeaurora.snapcam")) return true;
@@ -332,7 +344,6 @@ public class LockscreenCamera extends XposedModule {
 
     /**
      * ギャラリー起動インテントを SecureViewer へ書き換える（Injection 方式）
-     * 元の Intent オブジェクトを書き換えることで、カメラアプリが「自分で」SecureViewer を起動したように振る舞わせる
      */
     private void handleGalleryRedirect(Context ctx, Intent intent) {
         if (ctx == null || intent == null || intent.getAction() == null) return;
@@ -341,6 +352,19 @@ public class LockscreenCamera extends XposedModule {
         try {
             if (!isCameraPackage(ctx.getPackageName())) return;
         } catch (Exception e) { return; }
+
+        // GCam などが既にセキュアモードに入っている場合はリダイレクトしない
+        // intent.getData() が存在する場合、プレビューボタン押下とみなす
+        if (intent.getData() != null) {
+             // GCam Port などが自前で "is_secure_camera" を設定し、MIUI カメラ以外のパッケージ名の場合
+             // 衝突を避けるためスルーする
+            try {
+                if (intent.hasExtra("is_secure_camera") && !"com.android.camera".equals(ctx.getPackageName())) {
+                    Log.d(TAG, "Smart Bypass: Intent is already secure in non-MIUI app.");
+                    return;
+                }
+            } catch (Exception e) {}
+        }
 
         String action = intent.getAction();
         boolean isGallery = Intent.ACTION_VIEW.equals(action) ||
@@ -356,6 +380,7 @@ public class LockscreenCamera extends XposedModule {
                 uriList.add(intent.getData());
             }
 
+            // 既存のインテントを完全に再利用・改変して、システムを騙す
             intent.setComponent(new ComponentName(
                     "com.github.droserasprout.lockscreencamera",
                     "com.github.droserasprout.lockscreencamera.SecureViewerActivity"
@@ -383,7 +408,7 @@ public class LockscreenCamera extends XposedModule {
                             Intent.FLAG_ACTIVITY_CLEAR_TOP |
                             Intent.FLAG_ACTIVITY_NO_ANIMATION);
 
-            // ロック画面上に表示するための隠しフラグ
+            // ロック画面上に表示するためのフラグ
             intent.addFlags(0x00080000 | 0x00400000 | 0x00200000);
             
             Log.d(TAG, "Intent modification complete. Proceeding with hijacked intent.");
