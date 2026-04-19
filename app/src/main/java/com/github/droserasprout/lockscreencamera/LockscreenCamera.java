@@ -21,7 +21,6 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.content.ContentResolver;
 import android.content.ContentValues;
-
 import androidx.annotation.NonNull;
 
 import java.lang.reflect.Field;
@@ -37,17 +36,14 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.libxposed.api.XposedModule;
-import io.github.libxposed.api.XposedModuleInterface;
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
 import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 
 public class LockscreenCamera extends XposedModule {
 
     private static final String TAG = "LockscreenCamera";
-    // フィールド検索用キャッシュ
     private static final Map<String, Field> fieldCache = new ConcurrentHashMap<>();
 
-    // 書き換え対象の内部フィールド名リスト
     private static final String[] TARGET_BOOLEAN_FIELDS = {
         "mIsSecure", "mIsSecureCamera", "mKeyguardLocked",
         "mInLockScreen", "mIgnoreKeyguard", "mIsScreenOn",
@@ -62,16 +58,12 @@ public class LockscreenCamera extends XposedModule {
         super();
     }
 
-    // MIUI/HyperOS カメラのパッケージ名バリエーション
     private static final Set<String> MIUI_CAMERA_PACKAGES = new HashSet<>(Arrays.asList(
         "com.android.camera",
         "com.miui.camera",
         "com.xiaomi.camera"
     ));
 
-    /**
-     * MIUI 系カメラかどうかを多段的に判定する
-     */
     private boolean isMIUICamera(Activity act) {
         if (act == null) return false;
         String pkg = act.getPackageName();
@@ -92,9 +84,8 @@ public class LockscreenCamera extends XposedModule {
 
     // === SessionManager ===
     public static class SessionManager {
-        // AtomicBoolean でスレッドセーフを確保
         public static final AtomicBoolean isActive = new AtomicBoolean(false);
-        public static final List<Uri> SESSION_URIS = new CopyOnWriteArrayList<>();
+        public static final CopyOnWriteArrayList<Uri> SESSION_URIS = new CopyOnWriteArrayList<>();
 
         public static void start() {
             isActive.set(true);
@@ -109,9 +100,10 @@ public class LockscreenCamera extends XposedModule {
         }
 
         public static void add(Uri uri) {
-            if (isActive.get() && uri != null && !SESSION_URIS.contains(uri)) {
-                SESSION_URIS.add(uri);
-                Log.d(TAG, "Added to Session: " + uri + " | Total: " + SESSION_URIS.size());
+            if (isActive.get() && uri != null) {
+                if (SESSION_URIS.addIfAbsent(uri)) {
+                    Log.d(TAG, "Added to Session: " + uri + " | Total: " + SESSION_URIS.size());
+                }
             }
         }
     }
@@ -187,6 +179,7 @@ public class LockscreenCamera extends XposedModule {
                 final String methodName = mname;
                 hook(m).intercept(chain -> {
                     Object thisObj = chain.getThisObject();
+
                     if (thisObj instanceof Activity) {
                         Activity act = (Activity) thisObj;
                         boolean isTarget = isCameraActivity(act);
@@ -206,10 +199,8 @@ public class LockscreenCamera extends XposedModule {
                                 boolean isLockscreenLaunch = intent != null && intent.getBooleanExtra("com.miui.camera.extra.START_BY_KEYGUARD", false);
                                 boolean isMIUI = isMIUICamera(act);
 
-                                // super.onCreate を先に実行
                                 Object res = chain.proceed();
 
-                                // 【MiuiCamera 専用パッチ】フィールド偽装（super.onCreate 後に実行）
                                 if (isLockscreenLaunch && isMIUI) {
                                     for (String fieldName : TARGET_BOOLEAN_FIELDS) {
                                         try {
@@ -223,7 +214,6 @@ public class LockscreenCamera extends XposedModule {
                                     }
                                 }
 
-                                // Window フラグの直接注入
                                 applyWindowAndBufferFixes(act);
 
                                 if (isLockscreenLaunch) {
@@ -242,22 +232,36 @@ public class LockscreenCamera extends XposedModule {
 
         // 6. ContentResolver フック
         try {
-            // insert の戻り値を正しく URI として扱う
+            // Android 29 以下向け
             hook(ContentResolver.class.getDeclaredMethod("insert", Uri.class, ContentValues.class))
                 .intercept(chain -> {
                     if (SessionManager.isActive.get()) {
                         Uri requestedUri = (Uri) chain.getArgs().get(0);
                         Object result = chain.proceed();
                         Uri finalUri = (result instanceof Uri) ? (Uri) result : requestedUri;
-                        
-                        if (finalUri != null) {
-                            SessionManager.add(finalUri);
-                        }
+                        if (finalUri != null) SessionManager.add(finalUri);
                         return result;
                     }
                     return chain.proceed();
                 });
-            
+        } catch (Throwable ignored) {}
+
+        try {
+            // Android 30 以上向け
+            hook(ContentResolver.class.getDeclaredMethod("insert", Uri.class, ContentValues.class, Bundle.class))
+                .intercept(chain -> {
+                    if (SessionManager.isActive.get()) {
+                        Uri requestedUri = (Uri) chain.getArgs().get(0);
+                        Object result = chain.proceed();
+                        Uri finalUri = (result instanceof Uri) ? (Uri) result : requestedUri;
+                        if (finalUri != null) SessionManager.add(finalUri);
+                        return result;
+                    }
+                    return chain.proceed();
+                });
+        } catch (Throwable ignored) {}
+
+        try {
             hook(ContentResolver.class.getDeclaredMethod("update", Uri.class, ContentValues.class, String.class, String[].class))
                 .intercept(chain -> {
                     if (SessionManager.isActive.get()) {
@@ -280,12 +284,21 @@ public class LockscreenCamera extends XposedModule {
     // --- ヘルパーメソッド群 ---
 
     private boolean isCameraPackage(String pkg) {
-        if (pkg == null) return false;
-        if (pkg.equals("com.android.camera") || pkg.equals("org.codeaurora.snapcam")) return true;
-        if (pkg.contains("GoogleCamera")) return true;
-        if (pkg.contains("camera") && !pkg.startsWith("com.android.") && !pkg.startsWith("com.google.")) return true;
-        return false;
-    }
+            if (pkg == null) return false;
+    
+            // LC-02: ユーザーがスコープを管理することを前提に、互換性を優先した判定
+            // 1. ホワイトリスト（標準的なパッケージ）
+            if (pkg.equals("com.android.camera") || pkg.equals("org.codeaurora.snapcam")) return true;
+            
+            // 2. Google Camera バリエーション
+            if (pkg.contains("GoogleCamera")) return true;
+            
+            // 3. 広義の判定（サードパーティ製カメラやカスタムROM向け）
+            // android. や google. プレフィックスを除外することで、OS標準の無関係なサービスへの誤爆を最低限抑える
+            if (pkg.contains("camera") && !pkg.startsWith("com.android.") && !pkg.startsWith("com.google.")) return true;
+            
+            return false;
+        }
 
     private boolean isCameraActivity(Activity act) {
         try { return act != null && isCameraPackage(act.getPackageName()); } 
@@ -323,7 +336,6 @@ public class LockscreenCamera extends XposedModule {
 
         try { if (!isCameraPackage(ctx.getPackageName())) return; } catch (Exception e) { return; }
 
-        // 【Smart Bypass】GCam が既にセキュアモードに入っている場合はリダイレクトしない
         if (intent.getData() != null && intent.hasExtra("is_secure_camera") && !"com.android.camera".equals(ctx.getPackageName())) {
             Log.d(TAG, "Smart Bypass: Secure intent detected in 3rd party camera.");
             return;
@@ -351,7 +363,6 @@ public class LockscreenCamera extends XposedModule {
             }
             intent.putParcelableArrayListExtra("session_photos_list", uriList);
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NO_ANIMATION);
-            // ロック画面上に表示するための隠しフラグ
             intent.addFlags(0x00080000 | 0x00400000 | 0x00200000);
         }
     }
@@ -368,7 +379,6 @@ public class LockscreenCamera extends XposedModule {
                     KeyguardManager km = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
                     boolean isLocked = (km != null && km.isKeyguardLocked());
 
-                    // 1. デフォルトカメラを解決
                     Intent resolveIntent = new Intent("android.media.action.STILL_IMAGE_CAMERA_SECURE");
                     PackageManager pm = context.getPackageManager();
                     ResolveInfo info = pm.resolveActivity(resolveIntent, PackageManager.MATCH_DEFAULT_ONLY);
@@ -383,15 +393,12 @@ public class LockscreenCamera extends XposedModule {
                         isMIUI = isMIUIPackage(targetPkg);
                     }
 
-                    // 【重要】MIUI の場合は Permission Denial を避けるため通常アクションを使用
-                    // モジュール側でフィールドを偽装し「疑似セキュア」化
                     String action = isMIUI ? "android.media.action.STILL_IMAGE_CAMERA" 
                                            : "android.media.action.STILL_IMAGE_CAMERA_SECURE";
 
                     Intent intent = new Intent(action);
                     intent.setComponent(new ComponentName(targetPkg, targetCls));
 
-                    // 通常アクションでもキーガード起動フラグを明示的に注入
                     intent.putExtra("com.miui.camera.extra.START_BY_KEYGUARD", true);
                     intent.putExtra("is_secure_camera", true);
 
@@ -407,13 +414,11 @@ public class LockscreenCamera extends XposedModule {
                     context.startActivity(intent, options.toBundle());
                     return true;
                 } catch (Throwable t) { return chain.proceed(); }
+
             });
         } catch (Throwable ignored) {}
     }
 
-    /**
-     * MIUI Camera 専用 Window パッチ
-     */
     private void applyWindowAndBufferFixes(Activity activity) {
         try {
             activity.setShowWhenLocked(true);
@@ -422,15 +427,11 @@ public class LockscreenCamera extends XposedModule {
                 activity.setInheritShowWhenLocked(true);
             }
 
-            // MIUI Camera の場合、LayoutParams に直接フラグを注入
             if (isMIUICamera(activity)) {
                 Window window = activity.getWindow();
                 if (window != null) {
-                    // 競合フラグをクリア
-                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
                     
                     WindowManager.LayoutParams lp = window.getAttributes();
-                    // Xiaomi のロック画面表示に必須なフラグ群
                     lp.flags |= WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                               | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
                               | WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON;
@@ -440,9 +441,6 @@ public class LockscreenCamera extends XposedModule {
         } catch (Throwable ignored) {}
     }
 
-    /**
-     * クラス階層を遡ってフィールドを検索するヘルパー
-     */
     private Field findFieldRecursive(Class<?> clazz, String fieldName) {
         while (clazz != null) {
             try {
@@ -454,7 +452,6 @@ public class LockscreenCamera extends XposedModule {
         return null;
     }
 
-    // 既存の isMIUIPackage を再定義（onSystemServerStarting で使用）
     private boolean isMIUIPackage(String pkg) {
         return pkg != null && MIUI_CAMERA_PACKAGES.contains(pkg);
     }
