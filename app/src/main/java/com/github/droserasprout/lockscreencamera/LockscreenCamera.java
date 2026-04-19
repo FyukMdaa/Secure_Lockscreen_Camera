@@ -17,7 +17,6 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.MediaStore;
 import android.util.Log;
-import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
 import android.content.ContentResolver;
@@ -75,23 +74,23 @@ public class LockscreenCamera extends XposedModule {
      */
     private boolean isMIUICamera(Activity act) {
         if (act == null) return false;
-        
+
         String pkg = act.getPackageName();
         if (pkg != null && MIUI_CAMERA_PACKAGES.contains(pkg)) return true;
-        
+
         // パッケージ名が標準的でない場合、主要 Activity のクラス名でパターンマッチ
         String clsName = act.getClass().getName();
         if (clsName.contains("com.android.camera") || clsName.contains("com.miui.camera")) {
             return true;
         }
-        
+
         // 最終フォールバック：Xiaomi 端末かつカメラパッケージであれば適用（移植版向け）
         try {
             if ("xiaomi".equalsIgnoreCase(Build.MANUFACTURER) && isCameraPackage(pkg)) {
                 return true;
             }
         } catch (Exception ignored) {}
-        
+
         return false;
     }
 
@@ -183,9 +182,9 @@ public class LockscreenCamera extends XposedModule {
         String[] criticalMethods = {"onCreate", "onDestroy", "onWindowFocusChanged"};
         for (String mname : criticalMethods) {
             try {
-                Method m = Activity.class.getDeclaredMethod(mname, 
-                    "onCreate".equals(mname) ? new Class[]{Bundle.class} : 
-                    "onWindowFocusChanged".equals(mname) ? new Class[]{boolean.class} : 
+                Method m = Activity.class.getDeclaredMethod(mname,
+                    "onCreate".equals(mname) ? new Class[]{Bundle.class} :
+                    "onWindowFocusChanged".equals(mname) ? new Class[]{boolean.class} :
                     new Class[0]);
 
                 final String methodName = mname;
@@ -193,7 +192,6 @@ public class LockscreenCamera extends XposedModule {
                     Object thisObj = chain.getThisObject();
                     if (thisObj instanceof Activity) {
                         Activity act = (Activity) thisObj;
-                        boolean isMIUI = "com.android.camera".equals(act.getPackageName());
                         boolean isTarget = isCameraActivity(act);
 
                         if (isTarget) {
@@ -209,35 +207,31 @@ public class LockscreenCamera extends XposedModule {
                             if ("onCreate".equals(methodName)) {
                                 Intent intent = act.getIntent();
                                 boolean isLockscreenLaunch = intent != null && intent.getBooleanExtra("com.miui.camera.extra.START_BY_KEYGUARD", false);
+                                boolean isMIUI = isMIUICamera(act);
 
                                 // 【MIUI 専用パッチ】Intent 書き換え & フィールド強制書き換え
-                                if ("onCreate".equals(methodName)) {
-                                    Intent intent = act.getIntent();
-                                    boolean isLockscreenLaunch = intent != null && intent.getBooleanExtra("com.miui.camera.extra.START_BY_KEYGUARD", false);
-                                    
-                                    boolean isMIUI = isMIUICamera(act);
-                                
-                                    if (isLockscreenLaunch && isMIUI) {
-                                        if (intent != null) {
-                                            intent.putExtra("is_secure_camera", true);
-                                            intent.putExtra("ShowCameraWhenLocked", true);
-                                            act.setIntent(intent);
-                                        }
-                                
-                                        for (String fieldName : TARGET_BOOLEAN_FIELDS) {
-                                            try {
-                                                Field f = findFieldRecursive(act.getClass(), fieldName);
-                                                if (f != null) {
-                                                    f.setAccessible(true);
-                                                    if (f.getType() == boolean.class) f.setBoolean(act, true);
-                                                    else if (f.getType() == int.class) f.setInt(act, 1);
-                                                    else f.set(act, Boolean.TRUE);
-                                                }
-                                            } catch (Throwable ignored) {}
-                                        }
+                                if (isLockscreenLaunch && isMIUI) {
+                                    if (intent != null) {
+                                        intent.putExtra("is_secure_camera", true);
+                                        intent.putExtra("ShowCameraWhenLocked", true);
+                                        act.setIntent(intent);
                                     }
 
-                                Object res = chain.proceed(); // super.onCreate 実行
+                                    for (String fieldName : TARGET_BOOLEAN_FIELDS) {
+                                        try {
+                                            Field f = findFieldRecursive(act.getClass(), fieldName);
+                                            if (f != null) {
+                                                f.setAccessible(true);
+                                                if (f.getType() == boolean.class) f.setBoolean(act, true);
+                                                else if (f.getType() == int.class) f.setInt(act, 1);
+                                                else f.set(act, Boolean.TRUE);
+                                            }
+                                        } catch (Throwable ignored) {}
+                                    }
+                                }
+
+                                // super.onCreate の実行
+                                Object res = chain.proceed();
 
                                 if (isLockscreenLaunch) {
                                     SessionManager.start();
@@ -267,7 +261,7 @@ public class LockscreenCamera extends XposedModule {
                     }
                     return chain.proceed();
                 });
-            
+
             hook(ContentResolver.class.getDeclaredMethod("update", Uri.class, ContentValues.class, String.class, String[].class))
                 .intercept(chain -> {
                     if (SessionManager.isActive.get()) {
@@ -297,13 +291,13 @@ public class LockscreenCamera extends XposedModule {
     }
 
     private boolean isCameraActivity(Activity act) {
-        try { return act != null && isCameraPackage(act.getPackageName()); } 
+        try { return act != null && isCameraPackage(act.getPackageName()); }
         catch (Exception e) { return false; }
     }
 
     private boolean isCameraContext(Context ctx) {
         if (ctx == null) return false;
-        try { return isCameraPackage(ctx.getPackageName()); } 
+        try { return isCameraPackage(ctx.getPackageName()); }
         catch (Exception e) { return false; }
     }
 
@@ -404,7 +398,7 @@ public class LockscreenCamera extends XposedModule {
         try {
             activity.setShowWhenLocked(true);
             activity.setTurnScreenOn(true);
-            
+
             if (isMIUICamera(activity)) {
                 Window window = activity.getWindow();
                 if (window != null) {
