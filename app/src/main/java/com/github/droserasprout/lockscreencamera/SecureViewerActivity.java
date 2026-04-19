@@ -15,7 +15,6 @@ import android.view.MotionEvent;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
-import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.RecyclerView;
@@ -24,6 +23,7 @@ import androidx.viewpager2.widget.ViewPager2;
 import com.github.chrisbanes.photoview.PhotoView;
 
 import java.io.InputStream;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -41,7 +41,6 @@ public class SecureViewerActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // 1. ロック画面表示 & セキュリティ設定
         setShowWhenLocked(true);
         setTurnScreenOn(true);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
@@ -49,46 +48,33 @@ public class SecureViewerActivity extends Activity {
         }
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
 
-        // 2. データの受け取り（Intent から）
         List<Uri> uris = getIntent().getParcelableArrayListExtra("session_photos_list");
-
         if (uris == null || uris.isEmpty()) {
             Uri singleUri = getIntent().getData();
             if (singleUri != null) {
                 uris = new ArrayList<>();
                 uris.add(singleUri);
-                Log.i(TAG, "Fallback to single image from Intent Data");
             }
         }
 
         if (uris == null || uris.isEmpty()) {
-            Log.w(TAG, "No photos to show");
             finish();
             return;
         }
 
-        // 3. UI の構築 (ViewPager2)
         viewPager = new ViewPager2(this);
-        viewPager.setLayoutParams(new ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT));
+        viewPager.setLayoutParams(new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         viewPager.setBackgroundColor(0xFF000000);
-        
-        // 【追加】隣のページをプリロードし、スワイプの遅延を防ぐ
         viewPager.setOffscreenPageLimit(1);
 
-        // 下スワイプで閉じるためのラップレイアウトを作成
         SwipeDismissLayout container = new SwipeDismissLayout(this);
         container.addView(viewPager);
         setContentView(container);
 
-        // Adapter のセット
-        adapter = new PhotoAdapter(uris);
+        adapter = new PhotoAdapter(uris, this);
         viewPager.setAdapter(adapter);
-        // 最新画像 (リストの最後) に移動
         viewPager.setCurrentItem(uris.size() - 1, false);
 
-        // 4. 画面 OFF で自動終了
         screenOffReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) { finish(); }
         };
@@ -100,21 +86,15 @@ public class SecureViewerActivity extends Activity {
         }
     }
 
-    // OOM 対策：画面サイズに合わせて画像を縮小して読み込む
     private Bitmap decodeSampledBitmapFromUri(Uri uri, int reqWidth, int reqHeight) {
         try {
-            // 1. 画像のサイズだけ読み込む
             BitmapFactory.Options options = new BitmapFactory.Options();
             options.inJustDecodeBounds = true;
             try (InputStream is = getContentResolver().openInputStream(uri)) {
                 BitmapFactory.decodeStream(is, null, options);
             }
-
-            // 2. 縮小率を計算
             options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight);
             options.inJustDecodeBounds = false;
-
-            // 3. 縮小して読み込む
             try (InputStream is = getContentResolver().openInputStream(uri)) {
                 return BitmapFactory.decodeStream(is, null, options);
             }
@@ -128,12 +108,10 @@ public class SecureViewerActivity extends Activity {
         final int height = options.outHeight;
         final int width = options.outWidth;
         int inSampleSize = 1;
-
         if (height > reqHeight || width > reqWidth) {
             final int halfHeight = height / 2;
             final int halfWidth = width / 2;
-            while ((halfHeight / inSampleSize) >= reqHeight
-                    && (halfWidth / inSampleSize) >= reqWidth) {
+            while ((halfHeight / inSampleSize) >= reqHeight && (halfWidth / inSampleSize) >= reqWidth) {
                 inSampleSize *= 2;
             }
         }
@@ -149,7 +127,6 @@ public class SecureViewerActivity extends Activity {
         executor.shutdownNow();
     }
 
-    // 下スワイプ判定を行うカスタムレイアウト
     private class SwipeDismissLayout extends FrameLayout {
         private float initialY;
         private float initialX;
@@ -172,7 +149,6 @@ public class SecureViewerActivity extends Activity {
                 case MotionEvent.ACTION_MOVE:
                     float dy = ev.getY() - initialY;
                     float dx = Math.abs(ev.getX() - initialX);
-
                     if (dy > 50 && dy > dx) {
                         isSwiping = true;
                         return true;
@@ -185,29 +161,22 @@ public class SecureViewerActivity extends Activity {
         @Override
         public boolean onTouchEvent(MotionEvent ev) {
             if (!isSwiping) return super.onTouchEvent(ev);
-
             switch (ev.getActionMasked()) {
                 case MotionEvent.ACTION_MOVE:
                     float dy = ev.getY() - initialY;
                     float translationY = Math.max(0, dy);
-                    float progress = translationY / getHeight();
-
+                    float progress = getHeight() > 0 ? translationY / getHeight() : 0;
                     viewPager.setTranslationY(translationY);
                     viewPager.setAlpha(1.0f - (progress * 0.8f));
                     break;
-
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
                     if (viewPager.getTranslationY() > swipeThreshold) {
                         viewPager.setAlpha(0f);
                         finish();
                     } else {
-                        viewPager.animate()
-                                .translationY(0)
-                                .alpha(1.0f)
-                                .setDuration(200)
-                                .withStartAction(() -> isSwiping = false)
-                                .start();
+                        viewPager.animate().translationY(0).alpha(1.0f).setDuration(200)
+                                .withStartAction(() -> isSwiping = false).start();
                     }
                     break;
             }
@@ -215,12 +184,13 @@ public class SecureViewerActivity extends Activity {
         }
     }
 
-    // Adapter
     private class PhotoAdapter extends RecyclerView.Adapter<PhotoAdapter.PhotoViewHolder> {
         private final List<Uri> uris;
+        private final WeakReference<Activity> activityRef;
 
-        PhotoAdapter(List<Uri> uris) {
+        PhotoAdapter(List<Uri> uris, Activity activity) {
             this.uris = uris;
+            this.activityRef = new WeakReference<>(activity);
         }
 
         @NonNull
@@ -228,9 +198,7 @@ public class SecureViewerActivity extends Activity {
         public PhotoViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
             PhotoView photoView = new PhotoView(parent.getContext());
             photoView.setBackgroundColor(0xFF000000);
-            photoView.setLayoutParams(new ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT));
+            photoView.setLayoutParams(new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             photoView.setZoomable(true);
             return new PhotoViewHolder(photoView);
         }
@@ -238,14 +206,16 @@ public class SecureViewerActivity extends Activity {
         @Override
         public void onBindViewHolder(@NonNull PhotoViewHolder holder, int position) {
             holder.photoView.setImageDrawable(null);
-
             executor.execute(() -> {
-                int screenWidth = getResources().getDisplayMetrics().widthPixels;
-                int screenHeight = getResources().getDisplayMetrics().heightPixels;
+                Activity activity = activityRef.get();
+                if (activity == null || activity.isDestroyed()) return;
+
+                int screenWidth = activity.getResources().getDisplayMetrics().widthPixels;
+                int screenHeight = activity.getResources().getDisplayMetrics().heightPixels;
                 Bitmap bitmap = decodeSampledBitmapFromUri(uris.get(position), screenWidth, screenHeight);
 
                 if (bitmap != null) {
-                    runOnUiThread(() -> {
+                    activity.runOnUiThread(() -> {
                         if (holder.getAdapterPosition() == position) {
                             holder.photoView.setImageBitmap(bitmap);
                         } else {
@@ -256,18 +226,19 @@ public class SecureViewerActivity extends Activity {
             });
         }
 
+        // リサイクル時のメモリ解放
         @Override
-        public int getItemCount() {
-            return uris.size();
+        public void onViewRecycled(@NonNull PhotoViewHolder holder) {
+            super.onViewRecycled(holder);
+            holder.photoView.setImageDrawable(null);
         }
+
+        @Override
+        public int getItemCount() { return uris.size(); }
 
         class PhotoViewHolder extends RecyclerView.ViewHolder {
             PhotoView photoView;
-
-            PhotoViewHolder(PhotoView pv) {
-                super(pv);
-                photoView = pv;
-            }
+            PhotoViewHolder(PhotoView pv) { super(pv); photoView = pv; }
         }
     }
 }
