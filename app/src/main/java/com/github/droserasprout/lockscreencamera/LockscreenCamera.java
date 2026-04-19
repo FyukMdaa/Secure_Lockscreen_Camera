@@ -12,7 +12,6 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
-import android.graphics.PixelFormat;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -90,31 +89,8 @@ public class LockscreenCamera extends XposedModule {
 
         log(Log.INFO, TAG, "Targeting Camera App: " + pkg);
 
-        // 0. View の透明化・非表示化防止
-        try {
-            hook(View.class.getDeclaredMethod("setVisibility", int.class)).intercept(chain -> {
-                View view = (View) chain.getThisObject();
-                if (isCameraContext(view.getContext())) {
-                    List<Object> args = chain.getArgs();
-                    int vis = (int) args.get(0);
-                    if (isDecorView(view)) {
-                        if (vis != View.VISIBLE) args.set(0, View.VISIBLE);
-                    } else {
-                        if (vis != View.VISIBLE) args.set(0, View.VISIBLE);
-                    }
-                }
-                return chain.proceed();
-            });
-            hook(View.class.getDeclaredMethod("setAlpha", float.class)).intercept(chain -> {
-                View view = (View) chain.getThisObject();
-                if (isDecorView(view) && isCameraContext(view.getContext())) {
-                    List<Object> args = chain.getArgs();
-                    float alpha = (float) args.get(0);
-                    if (alpha < 1.0f) args.set(0, 1.0f);
-                }
-                return chain.proceed();
-            });
-        } catch (Throwable t) { log(Log.ERROR, TAG, "View hook failed", t); }
+        // setVisibility や setAlpha の操作は、Android 15 環境で Surface 生成を阻害し、
+        // 描画消失（Surface destroyed）を引き起こすため、一旦すべて削除します。
 
         // 1. Keyguard 解除要求ブロック
         try {
@@ -126,7 +102,7 @@ public class LockscreenCamera extends XposedModule {
             });
         } catch (Throwable ignored) {}
 
-        // 2. Visibility Spoofing
+        // 2. Visibility Spoofing (isResumed/hasWindowFocus)
         try {
             hook(Activity.class.getDeclaredMethod("hasWindowFocus")).intercept(chain -> {
                 if (isCameraActivity((Activity) chain.getThisObject())) return true;
@@ -189,11 +165,6 @@ public class LockscreenCamera extends XposedModule {
                             }
 
                             if ("onWindowFocusChanged".equals(methodName)) {
-                                boolean hasFocus = (boolean) chain.getArgs().get(0);
-                                // フォーカス取得時に Window 属性を再適用して描画を安定化
-                                if (hasFocus) {
-                                    applyWindowAndBufferFixes(act);
-                                }
                                 return chain.proceed();
                             }
 
@@ -217,7 +188,7 @@ public class LockscreenCamera extends XposedModule {
             } catch (Throwable ignored) {}
         }
 
-        // 6. ContentResolver フック
+        // 6. ContentResolver フック (セッション追跡)
         try {
             hook(ContentResolver.class.getDeclaredMethod("insert", Uri.class, ContentValues.class))
                 .intercept(chain -> {
@@ -268,10 +239,6 @@ public class LockscreenCamera extends XposedModule {
         if (ctx == null) return false;
         try { return isCameraPackage(ctx.getPackageName()); } 
         catch (Exception e) { return false; }
-    }
-
-    private boolean isDecorView(View v) {
-        return v != null && v.getClass().getName().endsWith("DecorView");
     }
 
     private void registerScreenOffReceiver(Activity act) {
@@ -365,31 +332,30 @@ public class LockscreenCamera extends XposedModule {
         } catch (Throwable ignored) {}
     }
 
-    // 描画安定化のための最小構成 Window 適用
+    /**
+     * OS の Secure Camera 挙動を最大限尊重するため、Window パラメータの操作を最小限にします。
+     * setFormat や addFlags は Surface 破棄の原因となるため削除しました。
+     */
     private void applyWindowAndBufferFixes(Activity activity) {
         try {
+            // 基本のロック画面表示設定
             activity.setShowWhenLocked(true);
             activity.setTurnScreenOn(true);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                activity.setInheritShowWhenLocked(true);
-            }
             
+            // Window の操作を一旦全て削除
+            /*
             Window window = activity.getWindow();
             if (window != null) {
-                // 競合を避けるため一旦クリア
                 window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
-                // 描画パイプラインを安定化させるため OPAQUE を使用
-                window.setFormat(PixelFormat.OPAQUE); 
+                window.setFormat(PixelFormat.OPAQUE);
                 
                 WindowManager.LayoutParams lp = window.getAttributes();
-                // 必要最小限のフラグのみ適用 
                 lp.flags |= WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                           | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                          | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-                          | WindowManager.LayoutParams.FLAG_FULLSCREEN;
-
+                          | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
                 window.setAttributes(lp);
             }
+            */
         } catch (Throwable ignored) {}
     }
 }
