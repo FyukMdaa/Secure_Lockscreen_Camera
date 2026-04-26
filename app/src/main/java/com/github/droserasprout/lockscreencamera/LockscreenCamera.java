@@ -142,14 +142,16 @@ public class LockscreenCamera extends XposedModule {
 
         log(Log.INFO, TAG, "Targeting Camera App: " + pkg);
 
-        // 0. View の非表示化・透明化を阻止
+        // 0. DecorView の非表示化・透明化を阻止
+        // DecorView のみを対象にすることで、カメラアプリ内のローディング表示・
+        // ダイアログ・アニメーション等、意図的な非表示処理への干渉を避ける。
         // Chain.getArgs() の戻り値は immutable なため、引数変更には
         // chain.proceed(Object[] args) を使用する
         try {
             hook(View.class.getDeclaredMethod("setVisibility", int.class))
                 .intercept(chain -> {
                     View view = (View) chain.getThisObject();
-                    if (isCameraContext(view.getContext())) {
+                    if (isDecorView(view) && isCameraContext(view.getContext())) {
                         int vis = (int) chain.getArg(0);
                         if (vis != View.VISIBLE) {
                             return chain.proceed(new Object[]{View.VISIBLE});
