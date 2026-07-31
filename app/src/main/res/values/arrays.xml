@@ -1,0 +1,6 @@
+<resources>
+    <!-- PreferenceScreen で初期化される空配列 -->
+    <string-array name="empty_array">
+        <item></item>
+    </string-array>
+</resources>
