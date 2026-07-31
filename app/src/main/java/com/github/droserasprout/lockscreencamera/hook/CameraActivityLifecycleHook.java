@@ -18,6 +18,7 @@ import java.util.WeakHashMap;
 
 import com.github.droserasprout.lockscreencamera.session.SessionManager;
 import com.github.droserasprout.lockscreencamera.util.CameraPackageUtil;
+import com.github.droserasprout.lockscreencamera.util.ModulePrefs;
 
 import io.github.libxposed.api.XposedModule;
 
@@ -32,6 +33,7 @@ public final class CameraActivityLifecycleHook {
     private static final String[] LIFECYCLE_METHODS =
             {"attachBaseContext", "onCreate", "onStart", "onResume", "onWindowFocusChanged", "onDestroy"};
 
+    private static final Map<Activity, Boolean> LOCKSCREEN_LAUNCHES = new WeakHashMap<>();
     private static final Map<Activity, BroadcastReceiver> ACTIVE_RECEIVERS = new WeakHashMap<>();
     private static SharedPreferences prefs;
 
@@ -56,13 +58,16 @@ public final class CameraActivityLifecycleHook {
                             SessionManager.end();
                         }
                         unregisterReceiver(act);
+                        LOCKSCREEN_LAUNCHES.remove(act);
                         return chain.proceed();
                     }
 
                     if ("onWindowFocusChanged".equals(mName)) {
                         boolean hasFocus = (boolean) ((List<?>) chain.getArgs()).get(0);
                         if (!hasFocus) return chain.proceed();
-                        WindowSecurityBypass.apply(act);
+                        if (shouldApplyWindowBypass(act)) {
+                            WindowSecurityBypass.apply(act);
+                        }
                         return chain.proceed();
                     }
 
@@ -71,7 +76,18 @@ public final class CameraActivityLifecycleHook {
 
                         Intent intent = act.getIntent();
                         boolean isLockscreenLaunch =
-                                intent != null && intent.getBooleanExtra(EXTRA_START_BY_KEYGUARD, false);
+                                intent != null && (intent.getBooleanExtra(EXTRA_START_BY_KEYGUARD, false)
+                                        || intent.getBooleanExtra("is_secure_camera", false)
+                                        || intent.getBooleanExtra("StartActivityWhenLocked", false));
+
+                        // INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE で起動された場合もロック画面起動とみなす
+                        if (!isLockscreenLaunch && intent != null
+                                && intent.getAction() != null
+                                && intent.getAction().contains("SECURE")) {
+                            isLockscreenLaunch = true;
+                        }
+
+                        LOCKSCREEN_LAUNCHES.put(act, isLockscreenLaunch);
 
                         if (isLockscreenLaunch) {
                             SessionManager.start();
@@ -79,15 +95,29 @@ public final class CameraActivityLifecycleHook {
                             registerScreenOffReceiver(act);
                         }
 
-                        WindowSecurityBypass.apply(act);
+                        if (shouldApplyWindowBypass(act)) {
+                            WindowSecurityBypass.apply(act);
+                        }
                         return res;
                     }
 
-                    WindowSecurityBypass.apply(act);
+                    if (shouldApplyWindowBypass(act)) {
+                        WindowSecurityBypass.apply(act);
+                    }
                     return chain.proceed();
                 });
             } catch (Throwable ignored) {}
         }
+    }
+
+    /**
+     * ウィンドウセキュリティバイパスを適用すべきか判定する。
+     * ロック画面起動時は常に適用。通常起動時は設定に依存。
+     */
+    private static boolean shouldApplyWindowBypass(Activity act) {
+        Boolean isLockscreen = LOCKSCREEN_LAUNCHES.get(act);
+        if (isLockscreen != null && isLockscreen) return true;
+        return ModulePrefs.shouldShowAboveLock(prefs);
     }
 
     private static Method resolveMethod(String methodName) throws NoSuchMethodException {

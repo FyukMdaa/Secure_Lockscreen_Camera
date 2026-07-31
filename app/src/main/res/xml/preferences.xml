@@ -43,6 +43,19 @@
 
     </PreferenceCategory>
 
+    <!-- ロック画面動作 -->
+    <PreferenceCategory
+        android:title="@string/pref_category_lockscreen"
+        android:summary="@string/pref_category_lockscreen_summary">
+
+        <SwitchPreferenceCompat
+            android:key="pref_show_above_lock"
+            android:title="@string/pref_show_above_lock_title"
+            android:summary="@string/pref_show_above_lock_summary"
+            android:defaultValue="false" />
+
+    </PreferenceCategory>
+
     <!-- 情報 -->
     <PreferenceCategory android:title="@string/pref_category_info">
         <Preference

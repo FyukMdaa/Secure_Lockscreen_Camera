@@ -9,6 +9,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 
@@ -33,9 +34,7 @@ public class SecureViewerActivity extends Activity {
     private static final String TAG = "SecureViewer";
     private static final String EXTRA_SESSION_PHOTOS = "session_photos_list";
 
-    // 並列デコードのためスレッド数を2に確保
     private final ExecutorService executor = Executors.newFixedThreadPool(2);
-    // position → 実行中タスク のマップ（高速スワイプ時の古いタスクをキャンセルするため）
     private final ConcurrentHashMap<Integer, Future<?>> pendingTasks = new ConcurrentHashMap<>();
 
     private BroadcastReceiver screenOffReceiver;
@@ -45,38 +44,71 @@ public class SecureViewerActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // ロック画面上に確実に表示するための設定
         setShowWhenLocked(true);
         setTurnScreenOn(true);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setInheritShowWhenLocked(true);
         }
-        // LockscreenCamera 側の clearFlags フックとは異なり、
-        // ここではスクリーンショット禁止のため FLAG_SECURE を意図的に維持する
-        getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
+
+        // Window レベルでもフラグを設定（API 27 以降は Activity API で十分だが、
+        // 一部 OEM では Window フラグも必要）
+        Window window = getWindow();
+        if (window != null) {
+            WindowManager.LayoutParams lp = window.getAttributes();
+            lp.flags |= WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                    | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                    | WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON;
+            window.setAttributes(lp);
+            // スクリーンショット禁止
+            window.setFlags(
+                    WindowManager.LayoutParams.FLAG_SECURE,
+                    WindowManager.LayoutParams.FLAG_SECURE);
+        }
 
         List<Uri> safeUris = resolveSafeUris();
         if (safeUris.isEmpty()) {
+            Log.w(TAG, "No URIs to display, finishing");
             finish();
             return;
         }
 
+        Log.i(TAG, "Displaying " + safeUris.size() + " photos");
         setupViewPager(safeUris);
         registerScreenOffReceiver();
     }
 
-    /**
-     * Intent から表示対象の URI リストを解決する。
-     * 修正メモ: リファクタリング版では content:// 以外のスキームを厳格に除外していたが、
-     * 一部のカメラアプリが file:// URI を渡すケースがあるため、
-     * オリジナルの動作に合わせて null チェックのみとしスキーマ検証は行わない。
-     */
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            // フォーカス取得時に再度ロック画面上への表示を確保
+            setShowWhenLocked(true);
+            getWindow().addFlags(
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                    | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
+        }
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        // バックキーで閉じる
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            finish();
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
     private List<Uri> resolveSafeUris() {
         List<Uri> uris = getIntent().getParcelableArrayListExtra(EXTRA_SESSION_PHOTOS);
         if (uris == null || uris.isEmpty()) {
             uris = new ArrayList<>();
             Uri singleUri = getIntent().getData();
             if (singleUri != null) uris.add(singleUri);
-            Log.i(TAG, "Fallback to single image from Intent Data");
+            if (!uris.isEmpty()) {
+                Log.i(TAG, "Fallback to single image from Intent Data: " + uris.get(0));
+            }
         }
         return uris != null ? uris : new ArrayList<>();
     }
@@ -117,17 +149,13 @@ public class SecureViewerActivity extends Activity {
     @Override
     protected void onStop() {
         super.onStop();
-        // onDestroy より早い段階で解除することで、プロセスが強制終了する前にも対応
         unregisterScreenOffReceiver();
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        // onStop で解除済みでも念のためガードする
         unregisterScreenOffReceiver();
-
-        // 実行中タスクを全キャンセル
         for (Future<?> task : pendingTasks.values()) {
             task.cancel(true);
         }
@@ -139,9 +167,7 @@ public class SecureViewerActivity extends Activity {
         if (screenOffReceiver == null) return;
         try {
             unregisterReceiver(screenOffReceiver);
-        } catch (Exception ignored) {
-            // 既に解除済み
-        }
+        } catch (Exception ignored) {}
         screenOffReceiver = null;
     }
 }

@@ -20,7 +20,6 @@ import androidx.preference.SwitchPreferenceCompat;
 import com.github.droserasprout.lockscreencamera.util.ModulePrefs;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -61,6 +60,7 @@ public class SettingsActivity extends AppCompatActivity {
             setupAutoDetect();
             setupPackageList();
             setupViewerSettings();
+            setupLockscreenSettings();
         }
 
         // ---- 自動検出 ----
@@ -282,6 +282,18 @@ public class SettingsActivity extends AppCompatActivity {
                 return "全カメラアプリで有効";
             }
             return exclusions.size() + " 個のアプリで無効化";
+        }
+
+        // ---- ロック画面動作設定 ----
+
+        private void setupLockscreenSettings() {
+            SwitchPreferenceCompat showAboveLock = findPreference("pref_show_above_lock");
+            if (showAboveLock != null) {
+                showAboveLock.setOnPreferenceChangeListener((preference, newValue) -> {
+                    ModulePrefs.setShowAboveLock(requireContext(), (Boolean) newValue);
+                    return true;
+                });
+            }
         }
     }
 }

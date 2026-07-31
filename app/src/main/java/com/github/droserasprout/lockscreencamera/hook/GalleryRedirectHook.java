@@ -11,6 +11,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.util.Log;
 
+import android.view.WindowManager;
+
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 
@@ -33,7 +35,9 @@ public final class GalleryRedirectHook {
     private static final String VIEWER_PACKAGE = "com.github.droserasprout.lockscreencamera";
     private static final String VIEWER_CLASS = "com.github.droserasprout.lockscreencamera.SecureViewerActivity";
 
-    private static final int FLAG_SHOW_WHEN_LOCKED_HIDDEN = 0x00080000 | 0x00400000 | 0x00200000;
+    private static final int FLAG_SHOW_WHEN_LOCKED = WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED;
+    private static final int FLAG_TURN_SCREEN_ON = WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON;
+    private static final int FLAG_ALLOW_LOCK_WHILE_SCREEN_ON = WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON;
 
     private static SharedPreferences prefs;
 
@@ -111,8 +115,9 @@ public final class GalleryRedirectHook {
                 | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
                 | Intent.FLAG_ACTIVITY_NEW_TASK
                 | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                | Intent.FLAG_ACTIVITY_NO_ANIMATION);
-        intent.addFlags(FLAG_SHOW_WHEN_LOCKED_HIDDEN);
+                | FLAG_SHOW_WHEN_LOCKED
+                | FLAG_TURN_SCREEN_ON
+                | FLAG_ALLOW_LOCK_WHILE_SCREEN_ON);
 
         Log.d(TAG, "Intent modification complete. Proceeding with hijacked intent.");
     }

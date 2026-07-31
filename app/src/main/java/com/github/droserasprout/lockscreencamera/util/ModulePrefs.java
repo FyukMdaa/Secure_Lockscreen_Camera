@@ -25,6 +25,7 @@ public final class ModulePrefs {
     public static final String KEY_ENABLED_PACKAGES = "enabled_packages";
     public static final String KEY_SECURE_VIEWER_ENABLED = "secure_viewer_enabled";
     public static final String KEY_SECURE_VIEWER_EXCLUSIONS = "secure_viewer_exclusions";
+    public static final String KEY_SHOW_ABOVE_LOCK = "show_above_lock";
     public static final String KEY_FIRST_RUN = "first_run";
 
     private ModulePrefs() {}
@@ -50,6 +51,12 @@ public final class ModulePrefs {
     public static void setSecureViewerExclusions(Context ctx, Set<String> packages) {
         getPrefs(ctx).edit()
                 .putStringSet(KEY_SECURE_VIEWER_EXCLUSIONS, packages)
+                .apply();
+    }
+
+    public static void setShowAboveLock(Context ctx, boolean enabled) {
+        getPrefs(ctx).edit()
+                .putBoolean(KEY_SHOW_ABOVE_LOCK, enabled)
                 .apply();
     }
 
@@ -106,6 +113,15 @@ public final class ModulePrefs {
      */
     public static boolean isPackageEnabled(SharedPreferences prefs, String pkg) {
         return getEnabledPackages(prefs).contains(pkg);
+    }
+
+    /**
+     * フックプロセス用: 通常起動時もカメラをロック画面上に表示するか。
+     * デフォルトは false（ロック画面起動時のみ表示）。
+     */
+    public static boolean shouldShowAboveLock(SharedPreferences prefs) {
+        if (prefs == null) return false;
+        return prefs.getBoolean(KEY_SHOW_ABOVE_LOCK, false);
     }
 
     // ---- デフォルト値 ----

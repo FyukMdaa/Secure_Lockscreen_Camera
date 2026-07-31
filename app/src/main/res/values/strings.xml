@@ -25,6 +25,12 @@
     <string name="pref_viewer_exclusions_summary">選択したアプリでは SecureViewer を無効化し、標準のレビューアーを使用します（GCam 等）</string>
     <string name="pref_viewer_exclusions_dialog_title">除外アプリを選択</string>
 
+    <!-- ロック画面表示 -->
+    <string name="pref_category_lockscreen">ロック画面動作</string>
+    <string name="pref_category_lockscreen_summary">ロック画面上でのカメラ表示動作を設定します</string>
+    <string name="pref_show_above_lock_title">通常起動時もロック画面上に表示</string>
+    <string name="pref_show_above_lock_summary">オンにすると、ロック画面から起動していない場合でもカメラがロック画面上に表示されます。オフ（推奨）ではロック画面起動時のみ表示します</string>
+
     <!-- 情報 -->
     <string name="pref_category_info">情報</string>
     <string name="pref_version_title">バージョン</string>
