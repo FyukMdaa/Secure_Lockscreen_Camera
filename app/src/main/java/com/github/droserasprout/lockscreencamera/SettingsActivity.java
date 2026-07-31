@@ -2,7 +2,6 @@ package com.github.droserasprout.lockscreencamera;
 
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
-import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.os.Bundle;
@@ -136,11 +135,8 @@ public class SettingsActivity extends AppCompatActivity {
 
         private void addIfInstalled(Set<String> target, String pkg, PackageManager pm) {
             try {
-                PackageInfo pi = pm.getPackageInfo(pkg, 0);
-                if ((pi.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0
-                        || (pi.applicationInfo.flags & ApplicationInfo.FLAG_INSTALLED) != 0) {
-                    target.add(pkg);
-                }
+                pm.getPackageInfo(pkg, 0);
+                target.add(pkg);
             } catch (PackageManager.NameNotFoundException ignored) {
                 // 未インストール
             }
