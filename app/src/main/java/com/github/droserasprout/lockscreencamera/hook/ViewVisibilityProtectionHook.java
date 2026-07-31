@@ -1,29 +1,25 @@
 package com.github.droserasprout.lockscreencamera.hook;
 
-import android.view.View;
-
-import java.util.List;
-
-import com.github.droserasprout.lockscreencamera.util.CameraPackageUtil;
-
 import io.github.libxposed.api.XposedModule;
 
-/** カメラアプリ内の SurfaceView 等（DecorView 以外）が非表示化されるのを阻止する。 */
+/**
+ * カメラアプリ内の SurfaceView 等が非表示化されるのを阻止する。
+ *
+ * 修正メモ: このクラスの setVisibility フックは DecorViewProtectionHook に統合された。
+ * View.setVisibility は単一のフックで DecorView / 非 DecorView を問わず
+ * カメラコンテキスト内で VISIBLE を強制するため、このクラスは空のまま残され、
+ * LockscreenCamera からの install 呼び出しは削除される。
+ */
 public final class ViewVisibilityProtectionHook {
 
     private ViewVisibilityProtectionHook() {}
 
+    /**
+     * 何もしない。setVisibility の保護は {@link DecorViewProtectionHook} に統合済み。
+     * 互換性のためクラス自体は残すが、新規コードからの呼び出しは不要。
+     */
     public static void install(XposedModule module) {
-        try {
-            module.hook(View.class.getMethod("setVisibility", int.class)).intercept(chain -> {
-                View v = (View) chain.getThisObject();
-                if (CameraPackageUtil.isCameraContext(v.getContext()) && !CameraPackageUtil.isDecorView(v)) {
-                    List<Object> args = chain.getArgs();
-                    int vis = (int) args.get(0);
-                    if (vis != View.VISIBLE) args.set(0, View.VISIBLE);
-                }
-                return chain.proceed();
-            });
-        } catch (Throwable ignored) {}
+        // setVisibility フックは DecorViewProtectionHook に統合されたため、
+        // ここでは何もしない。
     }
 }

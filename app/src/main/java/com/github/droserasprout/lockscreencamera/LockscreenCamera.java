@@ -13,7 +13,6 @@ import com.github.droserasprout.lockscreencamera.hook.KeyguardDismissBlockHook;
 import com.github.droserasprout.lockscreencamera.hook.KeyguardIntentRewriteHook;
 import com.github.droserasprout.lockscreencamera.hook.MediaStoreSessionTrackingHook;
 import com.github.droserasprout.lockscreencamera.hook.MiscSystemHook;
-import com.github.droserasprout.lockscreencamera.hook.ViewVisibilityProtectionHook;
 import com.github.droserasprout.lockscreencamera.util.CameraPackageUtil;
 
 import io.github.libxposed.api.XposedModule;
@@ -30,7 +29,7 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
  *  1. KeyguardDismissBlockHook       - requestDismissKeyguard（PIN画面表示要求）をブロック
  *  2. ActivityVisibilitySpoofHook    - hasWindowFocus/isResumed のスプーフィング
  *  3. KeyguardIntentRewriteHook      - getIntent() の動的書き換え
- *  4. ViewVisibilityProtectionHook   - SurfaceView 等の非表示化を阻止
+ *  4. (ViewVisibilityProtectionHook は DecorViewProtectionHook に統合済み)
  *  5. GalleryRedirectHook            - ギャラリー確認画面を SecureViewerActivity へリダイレクト
  *  6. CameraActivityLifecycleHook    - ライフサイクルフック（セッション開始・自動終了・ウィンドウ復元）
  *  7. MediaStoreSessionTrackingHook  - 撮影された写真の URI をセッションに記録
@@ -58,7 +57,7 @@ public class LockscreenCamera extends XposedModule {
         KeyguardDismissBlockHook.install(this);
         ActivityVisibilitySpoofHook.install(this);
         KeyguardIntentRewriteHook.install(this);
-        ViewVisibilityProtectionHook.install(this);
+        // ViewVisibilityProtectionHook は DecorViewProtectionHook に統合済み
         GalleryRedirectHook.install(this);
         CameraActivityLifecycleHook.install(this);
         MediaStoreSessionTrackingHook.install(this);

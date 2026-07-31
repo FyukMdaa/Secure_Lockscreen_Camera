@@ -64,24 +64,21 @@ public class SecureViewerActivity extends Activity {
         registerScreenOffReceiver();
     }
 
+    /**
+     * Intent から表示対象の URI リストを解決する。
+     * 修正メモ: リファクタリング版では content:// 以外のスキームを厳格に除外していたが、
+     * 一部のカメラアプリが file:// URI を渡すケースがあるため、
+     * オリジナルの動作に合わせて null チェックのみとしスキーマ検証は行わない。
+     */
     private List<Uri> resolveSafeUris() {
         List<Uri> uris = getIntent().getParcelableArrayListExtra(EXTRA_SESSION_PHOTOS);
         if (uris == null || uris.isEmpty()) {
             uris = new ArrayList<>();
             Uri singleUri = getIntent().getData();
             if (singleUri != null) uris.add(singleUri);
+            Log.i(TAG, "Fallback to single image from Intent Data");
         }
-
-        // URI のスキームを検証し content:// 以外を除外する
-        List<Uri> safeUris = new ArrayList<>();
-        for (Uri uri : uris) {
-            if ("content".equals(uri.getScheme())) {
-                safeUris.add(uri);
-            } else {
-                Log.w(TAG, "Rejected non-content URI: " + uri.getScheme());
-            }
-        }
-        return safeUris;
+        return uris != null ? uris : new ArrayList<>();
     }
 
     private void setupViewPager(List<Uri> safeUris) {
