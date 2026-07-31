@@ -4,8 +4,6 @@ import android.app.Activity;
 import android.content.Context;
 import android.view.View;
 
-import java.util.Set;
-
 /**
  * カメラアプリのパッケージ／コンテキスト／DecorView かどうかを判定するヘルパー群。
  * <p>
@@ -67,6 +65,7 @@ public final class CameraPackageUtil {
      * @deprecated 設定連動版 {@link #isCameraActivity(Activity, Context)} を推奨。
      * フック内で Context が取れない場合のフォールバック用。
      */
+    @Deprecated
     public static boolean isCameraActivity(Activity act) {
         if (act == null) return false;
         try {
@@ -89,6 +88,7 @@ public final class CameraPackageUtil {
     /**
      * @deprecated 設定連動版 {@link #isCameraContext(Context, Context)} を推奨。
      */
+    @Deprecated
     public static boolean isCameraContext(Context ctx) {
         if (ctx == null) return false;
         try {

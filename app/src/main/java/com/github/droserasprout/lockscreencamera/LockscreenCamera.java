@@ -40,7 +40,7 @@ public class LockscreenCamera extends XposedModule {
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
         String pkg = param.getPackageName();
-        Context context = (Context) param.getAndroidContext();
+        Context context = (Context) param.getApplication();
 
         // 設定ベースの判定（フォールバック付き）
         boolean enabled;
@@ -57,7 +57,7 @@ public class LockscreenCamera extends XposedModule {
 
         log(Log.INFO, TAG, "Targeting Camera App: " + pkg);
 
-        DecorViewProtectionHook.install(this);
+        DecorViewProtectionHook.install(this, context);
         KeyguardDismissBlockHook.install(this);
         ActivityVisibilitySpoofHook.install(this, context);
         KeyguardIntentRewriteHook.install(this, context);
