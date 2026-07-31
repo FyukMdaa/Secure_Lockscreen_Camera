@@ -2,6 +2,7 @@ package com.github.droserasprout.lockscreencamera.util;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.view.View;
 
 /**
@@ -18,20 +19,18 @@ public final class CameraPackageUtil {
 
     /**
      * フックプロセス用: 設定済みパッケージリストと照合する。
-     * context はターゲットアプリの Context（Activity 等）。
+     * prefs は {@code XposedModule.getRemotePreferences()} で取得したもの。
      */
-    public static boolean isCameraPackage(String pkg, Context context) {
-        if (pkg == null || context == null) return false;
-        return ModulePrefs.isPackageEnabled(context, pkg);
+    public static boolean isCameraPackage(String pkg, SharedPreferences prefs) {
+        if (pkg == null || prefs == null) return false;
+        return ModulePrefs.isPackageEnabled(prefs, pkg);
     }
 
     /**
-     * フォールバック用: context が取得できない場合にデフォルトリストで判定する。
-     * 設定画面が未設定の場合もこちらにフォールバックする。
+     * フォールバック用: prefs が取得できない場合にデフォルトリストで判定する。
      */
     public static boolean isCameraPackage(String pkg) {
         if (pkg == null) return false;
-        // ワイルドカードマッチは使わず、明示的なパッケージ名のみ
         return pkg.equals("com.android.camera")
                 || pkg.equals("com.google.android.GoogleCamera")
                 || pkg.equals("com.android.camera2")
@@ -43,27 +42,26 @@ public final class CameraPackageUtil {
      * 設定が利用可能かどうかをチェックし、
      * 可能なら設定リスト、不可ならフォールバックリストを使う。
      */
-    public static boolean isCameraPackage(String pkg, Context context, boolean useSettings) {
-        if (!useSettings || context == null) return isCameraPackage(pkg);
+    public static boolean isCameraPackage(String pkg, SharedPreferences prefs, boolean useSettings) {
+        if (!useSettings || prefs == null) return isCameraPackage(pkg);
         try {
-            return isCameraPackage(pkg, context);
+            return isCameraPackage(pkg, prefs);
         } catch (Exception e) {
             return isCameraPackage(pkg);
         }
     }
 
-    public static boolean isCameraActivity(Activity act, Context context) {
+    public static boolean isCameraActivity(Activity act, SharedPreferences prefs) {
         if (act == null) return false;
         try {
-            return isCameraPackage(act.getPackageName(), context);
+            return isCameraPackage(act.getPackageName(), prefs);
         } catch (Exception e) {
             return isCameraPackage(act.getPackageName());
         }
     }
 
     /**
-     * @deprecated 設定連動版 {@link #isCameraActivity(Activity, Context)} を推奨。
-     * フック内で Context が取れない場合のフォールバック用。
+     * @deprecated SharedPreferences 版 {@link #isCameraActivity(Activity, SharedPreferences)} を推奨。
      */
     @Deprecated
     public static boolean isCameraActivity(Activity act) {
@@ -76,17 +74,21 @@ public final class CameraPackageUtil {
         }
     }
 
-    public static boolean isCameraContext(Context ctx, Context settingsContext) {
+    /**
+     * フックプロセス用: View の Context のパッケージがカメラか判定する。
+     * prefs は {@code XposedModule.getRemotePreferences()} で取得したもの。
+     */
+    public static boolean isCameraContext(Context ctx, SharedPreferences prefs) {
         if (ctx == null) return false;
         try {
-            return isCameraPackage(ctx.getPackageName(), settingsContext);
+            return isCameraPackage(ctx.getPackageName(), prefs);
         } catch (Exception e) {
             return isCameraPackage(ctx.getPackageName());
         }
     }
 
     /**
-     * @deprecated 設定連動版 {@link #isCameraContext(Context, Context)} を推奨。
+     * @deprecated SharedPreferences 版 {@link #isCameraContext(Context, SharedPreferences)} を推奨。
      */
     @Deprecated
     public static boolean isCameraContext(Context ctx) {

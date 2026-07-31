@@ -6,6 +6,7 @@ import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
@@ -32,12 +33,12 @@ public final class CameraActivityLifecycleHook {
             {"attachBaseContext", "onCreate", "onStart", "onResume", "onWindowFocusChanged", "onDestroy"};
 
     private static final Map<Activity, BroadcastReceiver> ACTIVE_RECEIVERS = new WeakHashMap<>();
-    private static Context settingsContext;
+    private static SharedPreferences prefs;
 
     private CameraActivityLifecycleHook() {}
 
-    public static void install(XposedModule module, Context context) {
-        settingsContext = context;
+    public static void install(XposedModule module, SharedPreferences prefs) {
+        CameraActivityLifecycleHook.prefs = prefs;
 
         for (String methodName : LIFECYCLE_METHODS) {
             try {
@@ -48,7 +49,7 @@ public final class CameraActivityLifecycleHook {
                     if (!(thisObj instanceof Activity)) return chain.proceed();
 
                     Activity act = (Activity) thisObj;
-                    if (!CameraPackageUtil.isCameraActivity(act, settingsContext)) return chain.proceed();
+                    if (!CameraPackageUtil.isCameraActivity(act, CameraActivityLifecycleHook.prefs)) return chain.proceed();
 
                     if ("onDestroy".equals(mName)) {
                         if (SessionManager.isActive) {

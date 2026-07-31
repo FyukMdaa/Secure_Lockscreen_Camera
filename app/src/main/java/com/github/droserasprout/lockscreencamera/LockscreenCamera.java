@@ -1,6 +1,6 @@
 package com.github.droserasprout.lockscreencamera;
 
-import android.content.Context;
+import android.content.SharedPreferences;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
@@ -28,6 +28,8 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
  * パッケージ判定について:
  *   設定画面で選択されたパッケージリストを SharedPreferences から読み出し、
  *   一致する場合のみフックを適用する。設定が空の場合はフォールバックリストを使う。
+ *   libxposed API 101 では Context が取得できないため、
+ *   {@code getRemotePreferences()} で設定を読み取る。
  */
 public class LockscreenCamera extends XposedModule {
 
@@ -40,13 +42,21 @@ public class LockscreenCamera extends XposedModule {
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
         String pkg = param.getPackageName();
-        Context context = (Context) param.getApplication();
+
+        // libxposed API 101: Context は取得できないため getRemotePreferences を使用
+        SharedPreferences prefs;
+        try {
+            prefs = getRemotePreferences(ModulePrefs.PREFS_NAME);
+        } catch (Exception e) {
+            log(Log.WARN, TAG, "Failed to get remote preferences, using fallback");
+            prefs = null;
+        }
 
         // 設定ベースの判定（フォールバック付き）
         boolean enabled;
-        try {
-            enabled = ModulePrefs.isPackageEnabled(context, pkg);
-        } catch (Exception e) {
+        if (prefs != null) {
+            enabled = ModulePrefs.isPackageEnabled(prefs, pkg);
+        } else {
             enabled = CameraPackageUtil.isCameraPackage(pkg);
         }
 
@@ -57,12 +67,12 @@ public class LockscreenCamera extends XposedModule {
 
         log(Log.INFO, TAG, "Targeting Camera App: " + pkg);
 
-        DecorViewProtectionHook.install(this, context);
+        DecorViewProtectionHook.install(this, prefs);
         KeyguardDismissBlockHook.install(this);
-        ActivityVisibilitySpoofHook.install(this, context);
-        KeyguardIntentRewriteHook.install(this, context);
-        GalleryRedirectHook.install(this, context);
-        CameraActivityLifecycleHook.install(this, context);
+        ActivityVisibilitySpoofHook.install(this, prefs);
+        KeyguardIntentRewriteHook.install(this, prefs);
+        GalleryRedirectHook.install(this, prefs);
+        CameraActivityLifecycleHook.install(this, prefs);
         MediaStoreSessionTrackingHook.install(this);
         MiscSystemHook.install(this, param);
     }

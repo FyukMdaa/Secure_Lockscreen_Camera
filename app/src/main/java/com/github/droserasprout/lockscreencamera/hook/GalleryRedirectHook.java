@@ -6,6 +6,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Build;
 import android.util.Log;
@@ -34,12 +35,12 @@ public final class GalleryRedirectHook {
 
     private static final int FLAG_SHOW_WHEN_LOCKED_HIDDEN = 0x00080000 | 0x00400000 | 0x00200000;
 
-    private static Context settingsContext;
+    private static SharedPreferences prefs;
 
     private GalleryRedirectHook() {}
 
-    public static void install(XposedModule module, Context context) {
-        settingsContext = context;
+    public static void install(XposedModule module, SharedPreferences prefs) {
+        GalleryRedirectHook.prefs = prefs;
         try {
             Method startAct = Activity.class.getDeclaredMethod("startActivity", Intent.class);
             module.hook(startAct).intercept(chain -> {
@@ -69,10 +70,10 @@ public final class GalleryRedirectHook {
 
         String pkg;
         try { pkg = ctx.getPackageName(); } catch (Exception e) { return; }
-        if (!CameraPackageUtil.isCameraPackage(pkg, settingsContext)) return;
+        if (!CameraPackageUtil.isCameraPackage(pkg, GalleryRedirectHook.prefs)) return;
 
         // 設定で SecureViewer が無効化されているパッケージならスキップ
-        if (!ModulePrefs.shouldUseSecureViewer(settingsContext, pkg)) {
+        if (!ModulePrefs.shouldUseSecureViewer(GalleryRedirectHook.prefs, pkg)) {
             Log.d(TAG, "SecureViewer disabled for: " + pkg);
             return;
         }

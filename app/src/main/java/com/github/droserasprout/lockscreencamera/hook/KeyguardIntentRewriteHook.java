@@ -1,8 +1,8 @@
 package com.github.droserasprout.lockscreencamera.hook;
 
 import android.app.Activity;
-import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 
 import com.github.droserasprout.lockscreencamera.util.CameraPackageUtil;
 
@@ -12,17 +12,17 @@ import io.github.libxposed.api.XposedModule;
 public final class KeyguardIntentRewriteHook {
 
     private static final String EXTRA_START_BY_KEYGUARD = "com.miui.camera.extra.START_BY_KEYGUARD";
-    private static Context settingsContext;
+    private static SharedPreferences prefs;
 
     private KeyguardIntentRewriteHook() {}
 
-    public static void install(XposedModule module, Context context) {
-        settingsContext = context;
+    public static void install(XposedModule module, SharedPreferences prefs) {
+        KeyguardIntentRewriteHook.prefs = prefs;
         try {
             module.hook(Activity.class.getDeclaredMethod("getIntent")).intercept(chain -> {
                 Intent intent = (Intent) chain.proceed();
                 Activity act = (Activity) chain.getThisObject();
-                if (CameraPackageUtil.isCameraActivity(act, settingsContext) && intent != null
+                if (CameraPackageUtil.isCameraActivity(act, KeyguardIntentRewriteHook.prefs) && intent != null
                         && intent.getBooleanExtra(EXTRA_START_BY_KEYGUARD, false)) {
                     intent.putExtra("is_secure_camera", true);
                     intent.putExtra("ShowCameraWhenLocked", true);
