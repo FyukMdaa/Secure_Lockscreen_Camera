@@ -48,7 +48,7 @@
         <Preference
             android:key="pref_version"
             android:title="@string/pref_version_title"
-            android:summary="2.1.0" />
+            android:summary="3.1.0" />
     </PreferenceCategory>
 
 </PreferenceScreen>
