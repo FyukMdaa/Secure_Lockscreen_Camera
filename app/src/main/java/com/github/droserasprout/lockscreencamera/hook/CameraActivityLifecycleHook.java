@@ -55,7 +55,7 @@ public final class CameraActivityLifecycleHook {
 
                     if ("onDestroy".equals(mName)) {
                         if (SessionManager.isActive) {
-                            SessionManager.end();
+                            SessionManager.release();
                         }
                         unregisterReceiver(act);
                         LOCKSCREEN_LAUNCHES.remove(act);
