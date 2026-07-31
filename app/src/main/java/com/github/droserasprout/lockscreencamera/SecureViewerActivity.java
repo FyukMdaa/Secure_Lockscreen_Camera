@@ -11,8 +11,9 @@ import android.os.Bundle;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.ViewGroup;
-import android.view.WindowManager;
 
+import android.view.WindowManager;
+import android.view.Window;
 import androidx.viewpager2.widget.ViewPager2;
 
 import com.github.droserasprout.lockscreencamera.ui.PhotoAdapter;
