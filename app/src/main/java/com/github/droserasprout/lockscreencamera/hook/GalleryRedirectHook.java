@@ -84,8 +84,8 @@ public final class GalleryRedirectHook {
 
         String action = intent.getAction();
         boolean isGallery = Intent.ACTION_VIEW.equals(action)
-                || Intent.ACTION_PICK.equals(action)
-                || action.contains("REVIEW")
+            || Intent.ACTION_PICK.equals(action)
+            || action.contains("REVIEW");
         if (!isGallery) return;
 
         Log.i(TAG, "Redirecting to SecureViewer: Force hijacking intent");
