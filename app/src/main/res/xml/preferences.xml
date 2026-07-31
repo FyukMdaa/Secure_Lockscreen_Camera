@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- カメラパッケージ選択 -->
+    <PreferenceCategory
+        android:title="@string/pref_category_camera"
+        android:summary="@string/pref_category_camera_summary">
+
+        <Preference
+            android:key="pref_auto_detect"
+            android:title="@string/pref_auto_detect_title"
+            android:summary="@string/pref_auto_detect_summary" />
+
+        <MultiSelectListPreference
+            android:key="pref_enabled_packages"
+            android:title="@string/pref_enabled_packages_title"
+            android:summary="@string/pref_enabled_packages_summary"
+            android:entries="@array/empty_array"
+            android:entryValues="@array/empty_array"
+            android:dialogTitle="@string/pref_enabled_packages_dialog_title" />
+
+    </PreferenceCategory>
+
+    <!-- SecureViewer 設定 -->
+    <PreferenceCategory
+        android:title="@string/pref_category_viewer"
+        android:summary="@string/pref_category_viewer_summary">
+
+        <SwitchPreferenceCompat
+            android:key="pref_secure_viewer_enabled"
+            android:title="@string/pref_secure_viewer_title"
+            android:summary="@string/pref_secure_viewer_summary"
+            android:defaultValue="true" />
+
+        <MultiSelectListPreference
+            android:key="pref_secure_viewer_exclusions"
+            android:title="@string/pref_viewer_exclusions_title"
+            android:summary="@string/pref_viewer_exclusions_summary"
+            android:entries="@array/empty_array"
+            android:entryValues="@array/empty_array"
+            android:dialogTitle="@string/pref_viewer_exclusions_dialog_title"
+            android:dependency="pref_secure_viewer_enabled" />
+
+    </PreferenceCategory>
+
+    <!-- 情報 -->
+    <PreferenceCategory android:title="@string/pref_category_info">
+        <Preference
+            android:key="pref_version"
+            android:title="@string/pref_version_title"
+            android:summary="2.1.0" />
+    </PreferenceCategory>
+
+</PreferenceScreen>

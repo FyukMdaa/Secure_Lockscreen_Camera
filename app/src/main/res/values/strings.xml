@@ -1,4 +1,31 @@
 <resources>
     <string name="app_name">Secure Lockscreen Camera</string>
     <string name="xposed_description">Skip authentication on \"Quickly open camera\" gesture.</string>
+
+    <!-- 設定画面 -->
+    <string name="settings_title">設定</string>
+
+    <!-- カメラパッケージ -->
+    <string name="pref_category_camera">対象カメラアプリ</string>
+    <string name="pref_category_camera_summary">モジュールを注入するカメラアプリを選択します</string>
+    <string name="pref_auto_detect_title">カメラアプリを自動検出</string>
+    <string name="pref_auto_detect_summary">インストール済みのカメラアプリを検出して一覧に追加します</string>
+    <string name="pref_enabled_packages_title">有効なカメラアプリ</string>
+    <string name="pref_enabled_packages_summary">選択されたパッケージにのみフックを適用します</string>
+    <string name="pref_enabled_packages_dialog_title">カメラアプリを選択</string>
+    <string name="auto_detect_no_apps">カメラアプリが見つかりませんでした</string>
+    <string name="auto_detect_result">%d 個のカメラアプリを検出しました</string>
+
+    <!-- SecureViewer -->
+    <string name="pref_category_viewer">写真ビューアー</string>
+    <string name="pref_category_viewer_summary">撮影後のプレビュー画面の動作を設定します</string>
+    <string name="pref_secure_viewer_title">SecureViewer を使用</string>
+    <string name="pref_secure_viewer_summary">有効時はロック画面上で独自ビューアーにリダイレクトします。無効時はカメラアプリ標準のレビューアを使用します</string>
+    <string name="pref_viewer_exclusions_title">ビューアー除外アプリ</string>
+    <string name="pref_viewer_exclusions_summary">選択したアプリでは SecureViewer を無効化し、標準のレビューアーを使用します（GCam 等）</string>
+    <string name="pref_viewer_exclusions_dialog_title">除外アプリを選択</string>
+
+    <!-- 情報 -->
+    <string name="pref_category_info">情報</string>
+    <string name="pref_version_title">バージョン</string>
 </resources>

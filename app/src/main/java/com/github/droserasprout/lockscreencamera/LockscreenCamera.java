@@ -1,5 +1,6 @@
 package com.github.droserasprout.lockscreencamera;
 
+import android.content.Context;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
@@ -14,6 +15,7 @@ import com.github.droserasprout.lockscreencamera.hook.KeyguardIntentRewriteHook;
 import com.github.droserasprout.lockscreencamera.hook.MediaStoreSessionTrackingHook;
 import com.github.droserasprout.lockscreencamera.hook.MiscSystemHook;
 import com.github.droserasprout.lockscreencamera.util.CameraPackageUtil;
+import com.github.droserasprout.lockscreencamera.util.ModulePrefs;
 
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
@@ -21,20 +23,11 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 
 /**
  * モジュールのエントリーポイント。
- * 各機能は {@code hook} パッケージ内の専用クラスに委譲し、このクラス自体は
- * 「対象パッケージかどうかの判定」と「どのフックを組み込むか」の一覧だけを持つ。
+ * 各機能は {@code hook} パッケージ内の専用クラスに委譲する。
  *
- * 各フック機能の内容:
- *  0. DecorViewProtectionHook        - DecorView の透明化・非表示化を阻止
- *  1. KeyguardDismissBlockHook       - requestDismissKeyguard（PIN画面表示要求）をブロック
- *  2. ActivityVisibilitySpoofHook    - hasWindowFocus/isResumed のスプーフィング
- *  3. KeyguardIntentRewriteHook      - getIntent() の動的書き換え
- *  4. (ViewVisibilityProtectionHook は DecorViewProtectionHook に統合済み)
- *  5. GalleryRedirectHook            - ギャラリー確認画面を SecureViewerActivity へリダイレクト
- *  6. CameraActivityLifecycleHook    - ライフサイクルフック（セッション開始・自動終了・ウィンドウ復元）
- *  7. MediaStoreSessionTrackingHook  - 撮影された写真の URI をセッションに記録
- *  8. MiscSystemHook                 - onCameraUnavailable / canAuthenticate 対策
- *  -. CameraGestureLauncherHook      - システムサーバー側：カメラジェスチャーの起動ロジック
+ * パッケージ判定について:
+ *   設定画面で選択されたパッケージリストを SharedPreferences から読み出し、
+ *   一致する場合のみフックを適用する。設定が空の場合はフォールバックリストを使う。
  */
 public class LockscreenCamera extends XposedModule {
 
@@ -47,7 +40,18 @@ public class LockscreenCamera extends XposedModule {
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
         String pkg = param.getPackageName();
-        if (!CameraPackageUtil.isCameraPackage(pkg)) {
+        Context context = (Context) param.getAndroidContext();
+
+        // 設定ベースの判定（フォールバック付き）
+        boolean enabled;
+        try {
+            enabled = ModulePrefs.isPackageEnabled(context, pkg);
+        } catch (Exception e) {
+            enabled = CameraPackageUtil.isCameraPackage(pkg);
+        }
+
+        if (!enabled) {
+            log(Log.DEBUG, TAG, "Skipping non-target package: " + pkg);
             return;
         }
 
@@ -55,11 +59,10 @@ public class LockscreenCamera extends XposedModule {
 
         DecorViewProtectionHook.install(this);
         KeyguardDismissBlockHook.install(this);
-        ActivityVisibilitySpoofHook.install(this);
-        KeyguardIntentRewriteHook.install(this);
-        // ViewVisibilityProtectionHook は DecorViewProtectionHook に統合済み
-        GalleryRedirectHook.install(this);
-        CameraActivityLifecycleHook.install(this);
+        ActivityVisibilitySpoofHook.install(this, context);
+        KeyguardIntentRewriteHook.install(this, context);
+        GalleryRedirectHook.install(this, context);
+        CameraActivityLifecycleHook.install(this, context);
         MediaStoreSessionTrackingHook.install(this);
         MiscSystemHook.install(this, param);
     }

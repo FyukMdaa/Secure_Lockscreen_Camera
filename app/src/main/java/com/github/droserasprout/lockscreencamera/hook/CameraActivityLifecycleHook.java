@@ -22,14 +22,7 @@ import io.github.libxposed.api.XposedModule;
 
 /**
  * カメラ Activity のライフサイクルをフックし、
- *  - ロック画面起動時に SessionManager を開始
- *  - 画面 OFF で自動終了させる BroadcastReceiver を登録
- *  - onDestroy でセッション・レシーバーを後始末する
- *  - ライフサイクル中は常にウィンドウのロック画面バイパス属性を再適用する（{@link WindowSecurityBypass}）
- *
- * 修正メモ: 元の実装は onCreate で毎回 BroadcastReceiver を register していたが、
- * unregister する場所がどこにも無かった（onDestroy は SessionManager.end() のみ呼んでいた）。
- * ここでは Activity ごとに登録したレシーバーを WeakHashMap で保持し、onDestroy で確実に解除する。
+ * セッション開始・画面OFF時の自動終了・ウィンドウ属性の再適用を行う。
  */
 public final class CameraActivityLifecycleHook {
 
@@ -39,10 +32,13 @@ public final class CameraActivityLifecycleHook {
             {"attachBaseContext", "onCreate", "onStart", "onResume", "onWindowFocusChanged", "onDestroy"};
 
     private static final Map<Activity, BroadcastReceiver> ACTIVE_RECEIVERS = new WeakHashMap<>();
+    private static Context settingsContext;
 
     private CameraActivityLifecycleHook() {}
 
-    public static void install(XposedModule module) {
+    public static void install(XposedModule module, Context context) {
+        settingsContext = context;
+
         for (String methodName : LIFECYCLE_METHODS) {
             try {
                 Method method = resolveMethod(methodName);
@@ -52,7 +48,7 @@ public final class CameraActivityLifecycleHook {
                     if (!(thisObj instanceof Activity)) return chain.proceed();
 
                     Activity act = (Activity) thisObj;
-                    if (!CameraPackageUtil.isCameraActivity(act)) return chain.proceed();
+                    if (!CameraPackageUtil.isCameraActivity(act, settingsContext)) return chain.proceed();
 
                     if ("onDestroy".equals(mName)) {
                         if (SessionManager.isActive) {
@@ -89,9 +85,7 @@ public final class CameraActivityLifecycleHook {
                     WindowSecurityBypass.apply(act);
                     return chain.proceed();
                 });
-            } catch (Throwable ignored) {
-                // このメソッドがこの OS バージョンに存在しない場合はスキップ
-            }
+            } catch (Throwable ignored) {}
         }
     }
 
@@ -137,8 +131,6 @@ public final class CameraActivityLifecycleHook {
         if (receiver == null) return;
         try {
             act.unregisterReceiver(receiver);
-        } catch (Exception ignored) {
-            // 既に解除済み、または登録に失敗していた場合
-        }
+        } catch (Exception ignored) {}
     }
 }

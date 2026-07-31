@@ -15,12 +15,16 @@ import java.util.ArrayList;
 
 import com.github.droserasprout.lockscreencamera.session.SessionManager;
 import com.github.droserasprout.lockscreencamera.util.CameraPackageUtil;
+import com.github.droserasprout.lockscreencamera.util.ModulePrefs;
 
 import io.github.libxposed.api.XposedModule;
 
 /**
- * カメラアプリがシステムの「ギャラリー確認画面」を開こうとした際、
- * 独自の SecureViewerActivity にリダイレクトすることでロック中でも写真プレビューを可能にする。
+ * カメラアプリが「ギャラリー確認画面」を開こうとした際、
+ * 設定に応じて SecureViewerActivity にリダイレクトする。
+ * <p>
+ * GCam 等で SecureViewer が動作しない場合は設定画面で該当パッケージを
+ * 「ビューアー除外」に追加することで、カメラアプリ標準のレビューアが使われる。
  */
 public final class GalleryRedirectHook {
 
@@ -28,12 +32,14 @@ public final class GalleryRedirectHook {
     private static final String VIEWER_PACKAGE = "com.github.droserasprout.lockscreencamera";
     private static final String VIEWER_CLASS = "com.github.droserasprout.lockscreencamera.SecureViewerActivity";
 
-    // ロック画面上に表示するための隠しフラグ (SHOW_WHEN_LOCKED 系)
     private static final int FLAG_SHOW_WHEN_LOCKED_HIDDEN = 0x00080000 | 0x00400000 | 0x00200000;
+
+    private static Context settingsContext;
 
     private GalleryRedirectHook() {}
 
-    public static void install(XposedModule module) {
+    public static void install(XposedModule module, Context context) {
+        settingsContext = context;
         try {
             Method startAct = Activity.class.getDeclaredMethod("startActivity", Intent.class);
             module.hook(startAct).intercept(chain -> {
@@ -61,9 +67,13 @@ public final class GalleryRedirectHook {
         if (ctx == null || intent == null || intent.getAction() == null) return;
         if (!SessionManager.isActive) return;
 
-        try {
-            if (!CameraPackageUtil.isCameraPackage(ctx.getPackageName())) return;
-        } catch (Exception e) {
+        String pkg;
+        try { pkg = ctx.getPackageName(); } catch (Exception e) { return; }
+        if (!CameraPackageUtil.isCameraPackage(pkg, settingsContext)) return;
+
+        // 設定で SecureViewer が無効化されているパッケージならスキップ
+        if (!ModulePrefs.shouldUseSecureViewer(settingsContext, pkg)) {
+            Log.d(TAG, "SecureViewer disabled for: " + pkg);
             return;
         }
 
@@ -81,9 +91,8 @@ public final class GalleryRedirectHook {
             uriList.add(intent.getData());
         }
 
-        // 既存の intent を書き換えて再利用し、システムを騙す
         intent.setComponent(new ComponentName(VIEWER_PACKAGE, VIEWER_CLASS));
-        intent.setPackage(null); // Google フォトなどが候補に並ぶのを防ぐ
+        intent.setPackage(null);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.ICE_CREAM_SANDWICH) {
             intent.setSelector(null);
         }

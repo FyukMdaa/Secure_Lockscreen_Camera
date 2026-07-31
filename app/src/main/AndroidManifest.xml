@@ -9,6 +9,18 @@
         android:supportsRtl="true"
         tools:ignore="AllowBackup,MissingApplicationIcon">
 
+        <!-- 設定画面（LSPosed マネージャーから起動） -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="true"
+            android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ロック画面写真ビューアー -->
         <activity
             android:name=".SecureViewerActivity"
             android:exported="true"
